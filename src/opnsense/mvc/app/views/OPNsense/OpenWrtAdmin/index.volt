@@ -1,8 +1,12 @@
 <script>
     $(document).ready(function() {
         const editDialogId = "#{{ formGridRouter['edit_dialog_id'] }}";
+        const gridId = "#{{ formGridRouter['table_id'] }}";
         const sshKeyFieldId = "router\\.ssh_key_ref";
         const routerAddressFieldId = "router\\.address";
+        const routerStatusFieldId = "router\\.status";
+        const routerVersionFieldId = "router\\.version";
+        const brokerBannerId = "#openwrtAdminBrokerBanner";
 
         function copyTextToClipboard(text) {
             if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
@@ -59,7 +63,27 @@
             updateCopyButtonState();
         }
 
-        $("#{{ formGridRouter['table_id'] }}").UIBootgrid({
+        function hideLiveStatusFields() {
+            $("#" + routerStatusFieldId).closest(".form-group, tr").hide();
+            $("#" + routerVersionFieldId).closest(".form-group, tr").hide();
+        }
+
+        function updateBrokerBanner() {
+            ajaxCall("/api/openwrtadmin/service/status/", {}, function(data) {
+                const broker = data.broker || null;
+                if (broker && broker.ok && broker.body) {
+                    $(brokerBannerId).addClass("hidden").text("");
+                    return;
+                }
+
+                const serviceState = data.service || "unknown";
+                $(brokerBannerId)
+                    .removeClass("hidden")
+                    .text("PHP cannot reach the OpenWrt Admin broker on 127.0.0.1:9783. Service status: " + serviceState + ".");
+            });
+        }
+
+        $(gridId).UIBootgrid({
             search: "/api/openwrtadmin/settings/search_router/",
             get: "/api/openwrtadmin/settings/get_router/",
             set: "/api/openwrtadmin/settings/set_router/",
@@ -67,8 +91,18 @@
             del: "/api/openwrtadmin/settings/del_router/"
         });
 
+        updateBrokerBanner();
+
+        window.setInterval(function() {
+            updateBrokerBanner();
+            if (!$(editDialogId).is(":visible")) {
+                $(gridId).bootgrid("reload");
+            }
+        }, 60000);
+
         $(document).on("shown.bs.modal", editDialogId, function() {
             ensureCopyButton();
+            hideLiveStatusFields();
             $("#" + sshKeyFieldId).selectpicker("refresh");
             updateCopyButtonState();
         });
@@ -119,6 +153,7 @@
 </script>
 
 <div class="content-box">
+    <div class="alert alert-danger hidden" id="openwrtAdminBrokerBanner"></div>
     {{ partial('layout_partials/base_bootgrid_table', formGridRouter) }}
 </div>
 

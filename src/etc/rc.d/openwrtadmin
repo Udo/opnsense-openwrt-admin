@@ -1,0 +1,45 @@
+#!/bin/sh
+
+# PROVIDE: openwrtadmin
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="openwrtadmin"
+rcvar="openwrtadmin_enable"
+
+load_rc_config "${name}"
+
+: ${openwrtadmin_enable:="NO"}
+: ${openwrtadmin_python:="/usr/local/bin/python3"}
+: ${openwrtadmin_script:="/usr/local/opnsense/scripts/OPNsense/OpenWrtAdmin/broker.py"}
+: ${openwrtadmin_pidfile:="/var/run/openwrt-admind.pid"}
+: ${openwrtadmin_logfile:="/var/log/openwrt-admind.log"}
+
+pidfile="${openwrtadmin_pidfile}"
+procname="${openwrtadmin_python}"
+command="/usr/sbin/daemon"
+command_args="-f -p ${pidfile} -o ${openwrtadmin_logfile} ${openwrtadmin_python} ${openwrtadmin_script}"
+start_precmd="openwrtadmin_prestart"
+stop_postcmd="openwrtadmin_poststop"
+extra_commands="pollnow"
+pollnow_cmd="openwrtadmin_pollnow"
+
+openwrtadmin_prestart()
+{
+    mkdir -p /var/db/openwrt-admin /var/db/openwrt-admin/keys
+    touch "${openwrtadmin_logfile}"
+}
+
+openwrtadmin_poststop()
+{
+    rm -f "${pidfile}"
+}
+
+openwrtadmin_pollnow()
+{
+    /usr/local/opnsense/scripts/OPNsense/OpenWrtAdmin/brokerctl.sh poll-now
+}
+
+run_rc_command "$1"

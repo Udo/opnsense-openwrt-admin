@@ -1,0 +1,3 @@
+#!/bin/sh
+
+/usr/local/etc/rc.d/openwrtadmin onestop >/dev/null 2>&1 || true

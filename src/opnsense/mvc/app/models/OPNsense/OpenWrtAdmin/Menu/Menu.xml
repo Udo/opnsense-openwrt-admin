@@ -1,8 +1,9 @@
 <menu>
     <Services>
         <OpenWrtAdmin VisibleName="OpenWrt Admin" cssClass="fa fa-wifi fa-fw">
-            <Routers order="10" url="/ui/openwrtadmin"/>
-            <Settings order="20" url="/ui/openwrtadmin/general"/>
+            <Dashboard order="10" url="/ui/openwrtadmin/dashboard"/>
+            <Routers order="20" url="/ui/openwrtadmin"/>
+            <Settings order="30" url="/ui/openwrtadmin/general"/>
         </OpenWrtAdmin>
     </Services>
 </menu>
