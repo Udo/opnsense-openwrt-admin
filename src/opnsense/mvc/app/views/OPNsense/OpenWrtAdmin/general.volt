@@ -1,5 +1,33 @@
 <script>
     $(document).ready(function() {
+        function copyTextToClipboard(text) {
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+                return navigator.clipboard.writeText(text);
+            }
+
+            const deferred = $.Deferred();
+            const temp = $("<textarea>")
+                .css({position: "fixed", top: "-1000px", left: "-1000px"})
+                .val(text)
+                .appendTo("body");
+
+            temp.trigger("focus").trigger("select");
+
+            try {
+                if (document.execCommand("copy")) {
+                    deferred.resolve();
+                } else {
+                    deferred.reject();
+                }
+            } catch (e) {
+                deferred.reject(e);
+            } finally {
+                temp.remove();
+            }
+
+            return deferred.promise();
+        }
+
         function refreshSettings() {
             return mapDataToFormUI({'frmGeneralSettings': '/api/openwrtadmin/general/get'}).done(function() {
                 $("#settings\\.managed_public_key").attr("readonly", "readonly");
@@ -34,7 +62,7 @@
                 return;
             }
 
-            navigator.clipboard.writeText(publicKey).then(function() {
+            copyTextToClipboard(publicKey).then(function() {
                 $("#managedKeyCopyStatus").text("Copied.");
             }).catch(function() {
                 $("#managedKeyCopyStatus").text("Clipboard access failed.");
