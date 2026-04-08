@@ -1,0 +1,34 @@
+<model>
+    <mount>//OPNsense/OpenWrtAdmin</mount>
+    <description>OpenWrt router inventory for the OpenWrt Admin plugin.</description>
+    <items>
+        <settings>
+            <managed_key_comment type="TextField">
+                <Default>openwrt-admin@OPNsense</Default>
+            </managed_key_comment>
+            <managed_public_key type="TextField"/>
+            <managed_private_key type="TextField"/>
+        </settings>
+        <routers>
+            <router type="ArrayField">
+                <address type="HostnameField">
+                    <Required>Y</Required>
+                </address>
+                <hostname type="TextField">
+                    <Required>Y</Required>
+                </hostname>
+                <description type="DescriptionField"/>
+                <ssh_key_ref type=".\SshPublicKeyField">
+                    <Required>Y</Required>
+                    <Default>system:/root/.ssh/id_ed25519.pub</Default>
+                </ssh_key_ref>
+                <status type="TextField">
+                    <Default>Unknown</Default>
+                </status>
+                <version type="TextField">
+                    <Default>N/A</Default>
+                </version>
+            </router>
+        </routers>
+    </items>
+</model>

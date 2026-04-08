@@ -1,0 +1,9 @@
+<acl>
+    <page-services-openwrtadmin>
+        <name>Services: OpenWrt Admin</name>
+        <patterns>
+            <pattern>ui/openwrtadmin/*</pattern>
+            <pattern>api/openwrtadmin/*</pattern>
+        </patterns>
+    </page-services-openwrtadmin>
+</acl>

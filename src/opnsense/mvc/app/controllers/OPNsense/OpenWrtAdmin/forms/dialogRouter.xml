@@ -1,0 +1,53 @@
+<form>
+    <field>
+        <id>router.address</id>
+        <label>Address</label>
+        <type>text</type>
+        <help>Hostname or IP address of the OpenWrt router.</help>
+        <grid_view>
+            <width>16em</width>
+        </grid_view>
+    </field>
+    <field>
+        <id>router.hostname</id>
+        <label>Hostname</label>
+        <type>text</type>
+        <help>Display name for this router.</help>
+        <grid_view>
+            <width>14em</width>
+        </grid_view>
+    </field>
+    <field>
+        <id>router.description</id>
+        <label>Description</label>
+        <type>text</type>
+        <help>Optional notes about this router.</help>
+    </field>
+    <field>
+        <id>router.ssh_key_ref</id>
+        <label>SSH public key</label>
+        <type>dropdown</type>
+        <help>Select the firewall SSH public key that should be authorized on this router.</help>
+        <grid_view>
+            <visible>false</visible>
+        </grid_view>
+    </field>
+    <field>
+        <id>router.status</id>
+        <label>Status</label>
+        <type>text</type>
+        <help>Placeholder status column until live polling is implemented.</help>
+        <grid_view>
+            <width>10em</width>
+        </grid_view>
+    </field>
+    <field>
+        <id>router.version</id>
+        <label>Version</label>
+        <type>text</type>
+        <help>Placeholder firmware version until live polling is implemented.</help>
+        <grid_view>
+            <width>10em</width>
+        </grid_view>
+    </field>
+</form>

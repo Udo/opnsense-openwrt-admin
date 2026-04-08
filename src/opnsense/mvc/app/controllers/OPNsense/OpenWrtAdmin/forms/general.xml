@@ -1,0 +1,20 @@
+<form>
+    <field>
+        <id>settings.managed_key_comment</id>
+        <label>Managed key comment</label>
+        <type>text</type>
+        <help>Comment embedded into the plugin-managed SSH keypair when it is generated.</help>
+    </field>
+    <field>
+        <id>settings.managed_public_key</id>
+        <label>Managed public key</label>
+        <type>textbox</type>
+        <help>The OpenWrt Admin public key stored in this plugin's configuration.</help>
+    </field>
+    <field>
+        <id>settings.managed_private_key</id>
+        <label>Managed private key</label>
+        <type>textbox</type>
+        <help>The OpenWrt Admin private key stored in this plugin's configuration.</help>
+    </field>
+</form>
