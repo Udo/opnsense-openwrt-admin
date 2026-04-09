@@ -174,6 +174,8 @@ class BrokerState:
                     best_signal_dbm INTEGER,
                     worst_signal_dbm INTEGER,
                     signal_histogram TEXT,
+                    rx_bps INTEGER,
+                    tx_bps INTEGER,
                     latency_ms INTEGER,
                     last_seen TEXT,
                     last_error TEXT,
@@ -191,6 +193,8 @@ class BrokerState:
             self._ensure_column(conn, "router_status", "best_signal_dbm", "INTEGER")
             self._ensure_column(conn, "router_status", "worst_signal_dbm", "INTEGER")
             self._ensure_column(conn, "router_status", "signal_histogram", "TEXT")
+            self._ensure_column(conn, "router_status", "rx_bps", "INTEGER")
+            self._ensure_column(conn, "router_status", "tx_bps", "INTEGER")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS router_wireless_state (
@@ -249,6 +253,8 @@ class BrokerState:
                     signal_dbm INTEGER,
                     rx_bytes INTEGER,
                     tx_bytes INTEGER,
+                    rx_bps INTEGER,
+                    tx_bps INTEGER,
                     connected_seconds INTEGER,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (router_uuid, client_mac, network_name, radio_name)
@@ -256,6 +262,8 @@ class BrokerState:
                 """
             )
             self._ensure_column(conn, "router_client_status", "ip_address", "TEXT")
+            self._ensure_column(conn, "router_client_status", "rx_bps", "INTEGER")
+            self._ensure_column(conn, "router_client_status", "tx_bps", "INTEGER")
 
     def _ensure_column(self, conn, table_name, column_name, definition):
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
@@ -887,12 +895,75 @@ class BrokerState:
         with self._db_context() as conn:
             for item in results:
                 router = router_map[item["router_uuid"]]
+                previous_clients = {
+                    (
+                        str(row["client_mac"] or ""),
+                        str(row["network_name"] or ""),
+                        str(row["radio_name"] or ""),
+                    ): dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT client_mac, network_name, radio_name, rx_bytes, tx_bytes, updated_at
+                        FROM router_client_status
+                        WHERE router_uuid=?
+                        """,
+                        (item["router_uuid"],),
+                    ).fetchall()
+                }
+
+                router_rx_bps = 0
+                router_tx_bps = 0
+                client_associations = item.get("client_associations") or []
+                for client in client_associations:
+                    key = (
+                        str(client.get("client_mac") or ""),
+                        str(client.get("network_name") or ""),
+                        str(client.get("radio_name") or ""),
+                    )
+                    previous = previous_clients.get(key)
+                    rx_bps = None
+                    tx_bps = None
+                    if previous is not None:
+                        try:
+                            previous_ts = datetime.fromisoformat(str(previous.get("updated_at") or ""))
+                            current_ts = datetime.fromisoformat(str(item["updated_at"]))
+                            elapsed = max(0.0, (current_ts - previous_ts).total_seconds())
+                        except ValueError:
+                            elapsed = 0.0
+
+                        if elapsed > 0:
+                            current_rx = client.get("rx_bytes")
+                            previous_rx = previous.get("rx_bytes")
+                            current_tx = client.get("tx_bytes")
+                            previous_tx = previous.get("tx_bytes")
+                            if (
+                                isinstance(current_rx, int)
+                                and previous_rx is not None
+                                and int(previous_rx) >= 0
+                                and current_rx >= int(previous_rx)
+                            ):
+                                rx_bps = int((current_rx - int(previous_rx)) / elapsed)
+                            if (
+                                isinstance(current_tx, int)
+                                and previous_tx is not None
+                                and int(previous_tx) >= 0
+                                and current_tx >= int(previous_tx)
+                            ):
+                                tx_bps = int((current_tx - int(previous_tx)) / elapsed)
+
+                    client["rx_bps"] = rx_bps
+                    client["tx_bps"] = tx_bps
+                    if isinstance(rx_bps, int):
+                        router_rx_bps += rx_bps
+                    if isinstance(tx_bps, int):
+                        router_tx_bps += tx_bps
+
                 conn.execute(
                     """
                     UPDATE router_status
                     SET reachable=?, status_text=?, version=?, hardware_model=?, detected_hostname=?, load_1m=?,
                         uptime_seconds=?, memory_used_pct=?, wifi_clients=?, wifi_clients_by_radio=?, wifi_clients_by_network=?, best_signal_dbm=?,
-                        worst_signal_dbm=?, signal_histogram=?, latency_ms=?,
+                        worst_signal_dbm=?, signal_histogram=?, rx_bps=?, tx_bps=?, latency_ms=?,
                         last_seen=?, last_error=?, updated_at=?
                     WHERE router_uuid=?
                     """,
@@ -911,6 +982,8 @@ class BrokerState:
                         item["best_signal_dbm"],
                         item["worst_signal_dbm"],
                         item["signal_histogram"],
+                        router_rx_bps if client_associations else None,
+                        router_tx_bps if client_associations else None,
                         item["latency_ms"],
                         item["last_seen"],
                         item["last_error"],
@@ -924,8 +997,8 @@ class BrokerState:
                         """
                         INSERT INTO router_client_status (
                             router_uuid, client_mac, ip_address, network_name, radio_name, signal_dbm,
-                            rx_bytes, tx_bytes, connected_seconds, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            rx_bytes, tx_bytes, rx_bps, tx_bps, connected_seconds, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             item["router_uuid"],
@@ -936,6 +1009,8 @@ class BrokerState:
                             client.get("signal_dbm"),
                             client.get("rx_bytes"),
                             client.get("tx_bytes"),
+                            client.get("rx_bps"),
+                            client.get("tx_bps"),
                             client.get("connected_seconds"),
                             item["updated_at"],
                         ),
@@ -1575,7 +1650,7 @@ class BrokerState:
                 SELECT router_status.router_uuid, router_status.address, router_status.configured_hostname, router_status.description, router_status.ssh_key_ref,
                        router_status.reachable, router_status.status_text, router_status.version, router_status.hardware_model, router_status.detected_hostname, router_status.load_1m,
                        router_status.uptime_seconds, router_status.memory_used_pct, router_status.wifi_clients, router_status.wifi_clients_by_radio, router_status.wifi_clients_by_network, router_status.best_signal_dbm,
-                       router_status.worst_signal_dbm, router_status.signal_histogram, router_status.latency_ms,
+                       router_status.worst_signal_dbm, router_status.signal_histogram, router_status.rx_bps, router_status.tx_bps, router_status.latency_ms,
                        router_status.last_seen, router_status.last_error, router_status.updated_at,
                        wifi_state.content_hash AS wireless_content_hash,
                        wifi_state.fetched_at AS wireless_fetched_at,
@@ -1609,7 +1684,7 @@ class BrokerState:
                 """
                 SELECT router_client_status.router_uuid, router_client_status.client_mac, router_client_status.ip_address,
                        router_client_status.network_name, router_client_status.radio_name, router_client_status.signal_dbm,
-                       router_client_status.rx_bytes, router_client_status.tx_bytes, router_client_status.connected_seconds,
+                       router_client_status.rx_bytes, router_client_status.tx_bytes, router_client_status.rx_bps, router_client_status.tx_bps, router_client_status.connected_seconds,
                        router_client_status.updated_at,
                        router_status.address AS router_address, router_status.configured_hostname, router_status.detected_hostname
                 FROM router_client_status

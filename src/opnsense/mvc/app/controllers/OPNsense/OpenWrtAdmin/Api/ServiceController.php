@@ -246,6 +246,8 @@ class ServiceController extends ApiControllerBase
                 'signal_dbm' => isset($row['signal_dbm']) ? (int)$row['signal_dbm'] : null,
                 'rx_bytes' => isset($row['rx_bytes']) ? (int)$row['rx_bytes'] : null,
                 'tx_bytes' => isset($row['tx_bytes']) ? (int)$row['tx_bytes'] : null,
+                'rx_bps' => isset($row['rx_bps']) ? (int)$row['rx_bps'] : null,
+                'tx_bps' => isset($row['tx_bps']) ? (int)$row['tx_bps'] : null,
                 'connected_seconds' => isset($row['connected_seconds']) ? (int)$row['connected_seconds'] : null,
             ];
         }

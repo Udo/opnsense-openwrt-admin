@@ -26,6 +26,38 @@
             return signal + " dBm";
         }
 
+        function formatRate(value) {
+            if (value === null || value === undefined || value === "") {
+                return "---";
+            }
+
+            const units = ["B/s", "KB/s", "MB/s", "GB/s"];
+            let amount = Number(value);
+            let unit = 0;
+            while (amount >= 1024 && unit < units.length - 1) {
+                amount /= 1024;
+                unit += 1;
+            }
+            const decimals = amount >= 100 || unit === 0 ? 0 : 1;
+            return amount.toFixed(decimals) + " " + units[unit];
+        }
+
+        function formatBytes(value) {
+            if (value === null || value === undefined || value === "") {
+                return "---";
+            }
+
+            const units = ["B", "KB", "MB", "GB", "TB"];
+            let amount = Number(value);
+            let unit = 0;
+            while (amount >= 1024 && unit < units.length - 1) {
+                amount /= 1024;
+                unit += 1;
+            }
+            const decimals = amount >= 100 || unit === 0 ? 0 : 1;
+            return amount.toFixed(decimals) + " " + units[unit];
+        }
+
         function renderAssociations(client) {
             const wrapper = $("<div>");
             const associations = Array.isArray(client.associations) ? client.associations : [];
@@ -56,6 +88,11 @@
                             class: "openwrt-admin-client-association-meta",
                             text: networkLabel
                         })
+                    ).append(
+                        $("<div>", {
+                            class: "openwrt-admin-client-association-meta",
+                            text: "rx " + formatRate(association.rx_bps) + " / tx " + formatRate(association.tx_bps)
+                        })
                     )
                 );
             });
@@ -70,7 +107,7 @@
                 tbody.append(
                     $("<tr>").append(
                         $("<td>", {
-                            colspan: 5,
+                            colspan: 6,
                             class: "text-center text-muted",
                             text: "{{ lang._('No Wi-Fi clients are currently connected.') }}"
                         })
@@ -83,6 +120,13 @@
                 const hostname = client.hostname || "---";
                 const ipAddress = client.ip_address || "---";
                 const description = client.description_guess || "---";
+                const primaryAssociation = Array.isArray(client.associations) && client.associations.length ? client.associations[0] : null;
+                const throughput = primaryAssociation
+                    ? "rx " + formatRate(primaryAssociation.rx_bps) + " / tx " + formatRate(primaryAssociation.tx_bps)
+                    : "---";
+                const totals = primaryAssociation
+                    ? "rx " + formatBytes(primaryAssociation.rx_bytes) + " / tx " + formatBytes(primaryAssociation.tx_bytes)
+                    : "---";
 
                 tbody.append(
                     $("<tr>")
@@ -90,6 +134,10 @@
                         .append($("<td>").text(hostname))
                         .append($("<td>").text(ipAddress))
                         .append($("<td>").text(description))
+                        .append($("<td>").append(
+                            $("<div>").text(throughput),
+                            $("<div>", {class: "small text-muted", text: totals})
+                        ))
                         .append($("<td>").append(renderAssociations(client)))
                 );
             });
@@ -142,12 +190,13 @@
                                 <th>{{ lang._('Hostname') }}</th>
                                 <th>{{ lang._('IP Address') }}</th>
                                 <th>{{ lang._('DHCP Description') }}</th>
+                                <th>{{ lang._('Bandwidth') }}</th>
                                 <th>{{ lang._('APs / Signal') }}</th>
                             </tr>
                         </thead>
                         <tbody id="openwrtAdminClientStatsRows">
                             <tr>
-                                <td colspan="5" class="text-center text-muted">{{ lang._('Loading client data...') }}</td>
+                                <td colspan="6" class="text-center text-muted">{{ lang._('Loading client data...') }}</td>
                             </tr>
                         </tbody>
                     </table>

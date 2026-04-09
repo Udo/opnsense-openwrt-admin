@@ -185,6 +185,109 @@ class BrokerStateTestCase(unittest.TestCase):
         self.assertEqual(associations[0]["tx_bytes"], 67890)
         self.assertEqual(associations[0]["connected_seconds"], 321)
 
+    def test_write_poll_results_computes_bandwidth_deltas(self):
+        router = {
+            "router_uuid": "router-1",
+            "address": "192.0.2.10",
+            "hostname": "AP-1",
+            "description": "",
+            "ssh_key_ref": "system:/root/.ssh/id_ed25519.pub",
+        }
+        self.state.sync_router_rows([router])
+
+        self.state.write_poll_results(
+            [router],
+            [
+                {
+                    "router_uuid": "router-1",
+                    "reachable": 1,
+                    "status_text": "Healthy | 1m up",
+                    "version": "OpenWrt test",
+                    "hardware_model": "Test AP",
+                    "detected_hostname": "AP-1",
+                    "load_1m": 0.1,
+                    "uptime_seconds": 60,
+                    "memory_used_pct": 50,
+                    "wifi_clients": 1,
+                    "wifi_clients_by_radio": None,
+                    "wifi_clients_by_network": None,
+                    "best_signal_dbm": -50,
+                    "worst_signal_dbm": -50,
+                    "signal_histogram": None,
+                    "latency_ms": 10,
+                    "last_seen": "2026-04-09T00:00:00+00:00",
+                    "last_error": "",
+                    "updated_at": "2026-04-09T00:00:00+00:00",
+                    "client_associations": [
+                        {
+                            "client_mac": "aa:bb:cc:dd:ee:ff",
+                            "ip_address": "192.0.2.23",
+                            "network_name": "TestSSID",
+                            "radio_name": "phy0-ap0",
+                            "signal_dbm": -50,
+                            "rx_bytes": 1000,
+                            "tx_bytes": 2000,
+                            "connected_seconds": None,
+                        }
+                    ],
+                }
+            ],
+        )
+
+        self.state.write_poll_results(
+            [router],
+            [
+                {
+                    "router_uuid": "router-1",
+                    "reachable": 1,
+                    "status_text": "Healthy | 2m up",
+                    "version": "OpenWrt test",
+                    "hardware_model": "Test AP",
+                    "detected_hostname": "AP-1",
+                    "load_1m": 0.1,
+                    "uptime_seconds": 120,
+                    "memory_used_pct": 50,
+                    "wifi_clients": 1,
+                    "wifi_clients_by_radio": None,
+                    "wifi_clients_by_network": None,
+                    "best_signal_dbm": -49,
+                    "worst_signal_dbm": -49,
+                    "signal_histogram": None,
+                    "latency_ms": 12,
+                    "last_seen": "2026-04-09T00:00:10+00:00",
+                    "last_error": "",
+                    "updated_at": "2026-04-09T00:00:10+00:00",
+                    "client_associations": [
+                        {
+                            "client_mac": "aa:bb:cc:dd:ee:ff",
+                            "ip_address": "192.0.2.23",
+                            "network_name": "TestSSID",
+                            "radio_name": "phy0-ap0",
+                            "signal_dbm": -49,
+                            "rx_bytes": 6000,
+                            "tx_bytes": 5000,
+                            "connected_seconds": None,
+                        }
+                    ],
+                }
+            ],
+        )
+
+        with self.state._db_context() as conn:
+            client_row = conn.execute(
+                "SELECT rx_bps, tx_bps FROM router_client_status WHERE router_uuid=?",
+                ("router-1",),
+            ).fetchone()
+            router_row = conn.execute(
+                "SELECT rx_bps, tx_bps FROM router_status WHERE router_uuid=?",
+                ("router-1",),
+            ).fetchone()
+
+        self.assertEqual(client_row["rx_bps"], 500)
+        self.assertEqual(client_row["tx_bps"], 300)
+        self.assertEqual(router_row["rx_bps"], 500)
+        self.assertEqual(router_row["tx_bps"], 300)
+
 
 if __name__ == "__main__":
     unittest.main()

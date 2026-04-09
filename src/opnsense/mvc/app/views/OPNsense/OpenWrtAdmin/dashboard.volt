@@ -12,6 +12,22 @@
             return value === null || value === undefined ? "n/a" : value + "%";
         }
 
+        function formatRate(value) {
+            if (value === null || value === undefined || value === "") {
+                return "n/a";
+            }
+
+            const units = ["B/s", "KB/s", "MB/s", "GB/s"];
+            let amount = Number(value);
+            let unit = 0;
+            while (amount >= 1024 && unit < units.length - 1) {
+                amount /= 1024;
+                unit += 1;
+            }
+            const decimals = amount >= 100 || unit === 0 ? 0 : 1;
+            return amount.toFixed(decimals) + " " + units[unit];
+        }
+
         function renderWifiClients(router) {
             function renderPlaceholder() {
                 return $("<span>", {
@@ -174,7 +190,7 @@
                 tbody.append(
                     $("<tr>").append(
                         $("<td>", {
-                            colspan: 8,
+                            colspan: 9,
                             class: "text-center text-muted",
                             text: "{{ lang._('No routers registered yet.') }}"
                         })
@@ -219,6 +235,7 @@
                         .append($("<td>").text(formatUptime(router.uptime_seconds)))
                         .append($("<td>").text(formatPercent(router.memory_used_pct)))
                         .append($("<td>").append(renderWifiClients(router)))
+                        .append($("<td>").text("rx " + formatRate(router.rx_bps) + " / tx " + formatRate(router.tx_bps)))
                         .append($("<td>").append(renderSignal(router)))
                 );
             });
@@ -272,6 +289,7 @@
                                 <th>{{ lang._('Uptime') }}</th>
                                 <th>{{ lang._('Memory Used') }}</th>
                                 <th>{{ lang._('WiFi Clients / Network') }}</th>
+                                <th>{{ lang._('Bandwidth') }}</th>
                                 <th>{{ lang._('Signal') }}</th>
                             </tr>
                         </thead>
