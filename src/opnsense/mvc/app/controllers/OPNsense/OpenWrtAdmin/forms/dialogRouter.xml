@@ -12,7 +12,7 @@
         <id>router.hostname</id>
         <label>Hostname</label>
         <type>text</type>
-        <help>Display name for this router.</help>
+        <help>Display name for this router. Used as a label throughout the UI.</help>
         <grid_view>
             <width>14em</width>
         </grid_view>
@@ -21,22 +21,31 @@
         <id>router.description</id>
         <label>Description</label>
         <type>text</type>
-        <help>Optional notes about this router.</help>
+        <help>Optional notes about this router (location, role, etc.).</help>
+    </field>
+    <field>
+        <id>router.ssh_username</id>
+        <label>SSH username</label>
+        <type>text</type>
+        <help>Username for SSH connections to this router. Leave as 'root' unless you have configured a dedicated SSH user on the router.</help>
+        <grid_view>
+            <visible>false</visible>
+        </grid_view>
     </field>
     <field>
         <id>router.ssh_key_ref</id>
         <label>SSH public key</label>
         <type>dropdown</type>
-        <help>Select the firewall SSH public key that should be authorized on this router.</help>
+        <help>Select the firewall SSH public key that should be authorized on this router. Use 'Copy Public Key' to copy it to the clipboard, then add it to /root/.ssh/authorized_keys on the router.</help>
         <grid_view>
             <visible>false</visible>
         </grid_view>
     </field>
     <field>
         <id>router.sync_wifi_config_from</id>
-        <label>Sync wifi config from</label>
+        <label>Sync Wi-Fi config from</label>
         <type>dropdown</type>
-        <help>Select another router of the same model to serve as the source for Wi-Fi config sync.</help>
+        <help>Select another router of the same hardware model to use as the Wi-Fi config source. When synced, this router's /etc/config/wireless will be overwritten with the source's content.</help>
         <grid_view>
             <visible>false</visible>
         </grid_view>
@@ -45,7 +54,7 @@
         <id>router.sync_system_config_from</id>
         <label>Sync system config from</label>
         <type>dropdown</type>
-        <help>Select another router of the same model to serve as the source for system config sync. The target hostname will be preserved.</help>
+        <help>Select another router of the same hardware model to use as the system config source. When synced, /etc/config/system will be overwritten from the source — except the hostname, which is always preserved from this router.</help>
         <grid_view>
             <visible>false</visible>
         </grid_view>
@@ -54,25 +63,25 @@
         <id>router.sync_firewall_config_from</id>
         <label>Sync firewall config from</label>
         <type>dropdown</type>
-        <help>Select another router of the same model to serve as the source for firewall config sync.</help>
+        <help>Select another router of the same hardware model to use as the firewall config source. When synced, /etc/config/firewall will be overwritten with the source's content.</help>
         <grid_view>
             <visible>false</visible>
         </grid_view>
     </field>
     <field>
         <id>router.sync_dhcp_config_from</id>
-        <label>Sync dhcp config from</label>
+        <label>Sync DHCP config from</label>
         <type>dropdown</type>
-        <help>Select another router of the same model to serve as the source for DHCP config sync.</help>
+        <help>Select another router of the same hardware model to use as the DHCP config source. When synced, /etc/config/dhcp (dnsmasq settings) will be overwritten with the source's content.</help>
         <grid_view>
             <visible>false</visible>
         </grid_view>
     </field>
     <field>
         <id>router.sync_rpcd_config_from</id>
-        <label>Sync rpcd config from</label>
+        <label>Sync authentication config from (rpcd)</label>
         <type>dropdown</type>
-        <help>Select another router of the same model to serve as the source for rpcd config sync.</help>
+        <help>Select another router of the same hardware model to use as the rpcd config source. rpcd controls LuCI and ubus access control (users, roles, permissions). When synced, /etc/config/rpcd will be overwritten with the source's content.</help>
         <grid_view>
             <visible>false</visible>
         </grid_view>
@@ -81,7 +90,7 @@
         <id>router.sync_status</id>
         <label>Config Source</label>
         <type>text</type>
-        <help>The configured config sync source and whether the target is currently in sync.</help>
+        <help>The configured config sync source(s) and whether this router's configs currently match the source.</help>
         <grid_view>
             <width>16em</width>
         </grid_view>
@@ -90,7 +99,7 @@
         <id>router.status</id>
         <label>Status</label>
         <type>text</type>
-        <help>Placeholder status column until live polling is implemented.</help>
+        <help>Live health status from the last broker poll: Healthy, Warning, or Critical based on CPU load, memory, and disk usage.</help>
         <grid_view>
             <width>10em</width>
         </grid_view>
@@ -99,7 +108,7 @@
         <id>router.version</id>
         <label>Version</label>
         <type>text</type>
-        <help>Placeholder firmware version until live polling is implemented.</help>
+        <help>OpenWrt firmware version detected from the last broker poll.</help>
         <grid_view>
             <width>10em</width>
         </grid_view>
@@ -108,7 +117,7 @@
         <id>router.hardware</id>
         <label>Hardware</label>
         <type>text</type>
-        <help>Detected hardware model from the router.</help>
+        <help>Hardware model detected from the last broker poll.</help>
         <grid_view>
             <width>16em</width>
         </grid_view>

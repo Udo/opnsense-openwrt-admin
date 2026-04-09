@@ -123,12 +123,13 @@ class SshKeyStore
 
     public static function defaultRef(): string
     {
+        $all = self::list();
         $defaultSystemRef = 'system:' . self::DEFAULT_ROOT_KEY;
-        if (isset(self::list()[$defaultSystemRef])) {
+        if (isset($all[$defaultSystemRef])) {
             return $defaultSystemRef;
         }
 
-        $keys = array_keys(self::list());
+        $keys = array_keys($all);
         return $keys[0] ?? '';
     }
 

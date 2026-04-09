@@ -31,6 +31,14 @@ stop_broker() {
     fi
 
     kill "$(cat "${PIDFILE}")"
+
+    # Wait up to 5 seconds for the process to exit before removing the PID file.
+    i=0
+    while [ "${i}" -lt 50 ] && is_running; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+
     rm -f "${PIDFILE}"
     echo "stopped"
 }
@@ -44,7 +52,7 @@ status_broker() {
 }
 
 poll_now() {
-    "${PYTHON_BIN}" -c "import json, urllib.request; print(urllib.request.urlopen(urllib.request.Request('${API_URL}/v1/poll-now', method='POST'), timeout=2).read().decode())"
+    curl -sf -X POST "${API_URL}/v1/poll-now" || echo '{"status":"error","message":"Broker not reachable"}'
 }
 
 case "${1:-}" in
@@ -56,7 +64,6 @@ case "${1:-}" in
         ;;
     restart)
         stop_broker || true
-        sleep 1
         start_broker
         ;;
     status)

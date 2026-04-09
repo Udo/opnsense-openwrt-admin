@@ -1,33 +1,7 @@
+{{ partial("OPNsense/OpenWrtAdmin/_js_utils") }}
+
 <script>
     $(document).ready(function() {
-        function copyTextToClipboard(text) {
-            if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-                return navigator.clipboard.writeText(text);
-            }
-
-            const deferred = $.Deferred();
-            const temp = $("<textarea>")
-                .css({position: "fixed", top: "-1000px", left: "-1000px"})
-                .val(text)
-                .appendTo("body");
-
-            temp.trigger("focus").trigger("select");
-
-            try {
-                if (document.execCommand("copy")) {
-                    deferred.resolve();
-                } else {
-                    deferred.reject();
-                }
-            } catch (e) {
-                deferred.reject(e);
-            } finally {
-                temp.remove();
-            }
-
-            return deferred.promise();
-        }
-
         function refreshSettings() {
             return mapDataToFormUI({'frmGeneralSettings': '/api/openwrtadmin/general/get'}).done(function() {
                 $("#settings\\.managed_public_key").attr("readonly", "readonly");
@@ -56,16 +30,16 @@
         });
 
         $("#copyManagedPublicKeyAct").click(function() {
-            const publicKey = $("#settings\\.managed_public_key").val();
+            var publicKey = $("#settings\\.managed_public_key").val();
             if (!publicKey) {
-                $("#managedKeyCopyStatus").text("No managed public key available.");
+                $("#managedKeyCopyStatus").text("{{ lang._('No managed public key available.') }}");
                 return;
             }
 
-            copyTextToClipboard(publicKey).then(function() {
-                $("#managedKeyCopyStatus").text("Copied.");
+            openwrtAdminCopyToClipboard(publicKey).then(function() {
+                $("#managedKeyCopyStatus").text("{{ lang._('Copied.') }}");
             }).catch(function() {
-                $("#managedKeyCopyStatus").text("Clipboard access failed.");
+                $("#managedKeyCopyStatus").text("{{ lang._('Clipboard access failed.') }}");
             });
         });
     });

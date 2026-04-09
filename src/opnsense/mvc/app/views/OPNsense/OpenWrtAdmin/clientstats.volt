@@ -1,3 +1,5 @@
+{{ partial("OPNsense/OpenWrtAdmin/_js_utils") }}
+
 <style>
     .openwrt-admin-client-association {
         margin-bottom: 6px;
@@ -15,31 +17,15 @@
 
 <script>
     $(document).ready(function() {
-        const tbody = $("#openwrtAdminClientStatsRows");
-        const statusLine = $("#openwrtAdminClientStatsStatus");
-        const brokerBanner = $("#openwrtAdminClientStatsBrokerBanner");
+        var tbody = $("#openwrtAdminClientStatsRows");
+        var statusLine = $("#openwrtAdminClientStatsStatus");
+        var brokerBanner = "#openwrtAdminClientStatsBrokerBanner";
 
         function formatSignal(signal) {
             if (signal === null || signal === undefined || signal === "") {
-                return "signal n/a";
+                return "{{ lang._('signal n/a') }}";
             }
             return signal + " dBm";
-        }
-
-        function formatRate(value) {
-            if (value === null || value === undefined || value === "") {
-                return "---";
-            }
-
-            const units = ["B/s", "KB/s", "MB/s", "GB/s"];
-            let amount = Number(value);
-            let unit = 0;
-            while (amount >= 1024 && unit < units.length - 1) {
-                amount /= 1024;
-                unit += 1;
-            }
-            const decimals = amount >= 100 || unit === 0 ? 0 : 1;
-            return amount.toFixed(decimals) + " " + units[unit];
         }
 
         function formatBytes(value) {
@@ -47,20 +33,20 @@
                 return "---";
             }
 
-            const units = ["B", "KB", "MB", "GB", "TB"];
-            let amount = Number(value);
-            let unit = 0;
+            var units = ["B", "KB", "MB", "GB", "TB"];
+            var amount = Number(value);
+            var unit = 0;
             while (amount >= 1024 && unit < units.length - 1) {
                 amount /= 1024;
                 unit += 1;
             }
-            const decimals = amount >= 100 || unit === 0 ? 0 : 1;
+            var decimals = amount >= 100 || unit === 0 ? 0 : 1;
             return amount.toFixed(decimals) + " " + units[unit];
         }
 
         function renderAssociations(client) {
-            const wrapper = $("<div>");
-            const associations = Array.isArray(client.associations) ? client.associations : [];
+            var wrapper = $("<div>");
+            var associations = Array.isArray(client.associations) ? client.associations : [];
 
             if (!associations.length) {
                 return $("<span>", {
@@ -70,8 +56,8 @@
             }
 
             associations.forEach(function(association) {
-                const apLabel = association.ap_hostname || association.ap_address || "Unknown AP";
-                const networkLabel = association.network_name || association.radio_name || "unknown network";
+                var apLabel = association.ap_hostname || association.ap_address || "{{ lang._('Unknown AP') }}";
+                var networkLabel = association.network_name || association.radio_name || "{{ lang._('unknown network') }}";
                 wrapper.append(
                     $("<div>", {
                         class: "openwrt-admin-client-association"
@@ -91,7 +77,7 @@
                     ).append(
                         $("<div>", {
                             class: "openwrt-admin-client-association-meta",
-                            text: "rx " + formatRate(association.rx_bps) + " / tx " + formatRate(association.tx_bps)
+                            text: "rx " + openwrtAdminFormatRate(association.rx_bps) + " / tx " + openwrtAdminFormatRate(association.tx_bps)
                         })
                     )
                 );
@@ -117,14 +103,14 @@
             }
 
             clients.forEach(function(client) {
-                const hostname = client.hostname || "---";
-                const ipAddress = client.ip_address || "---";
-                const description = client.description_guess || "---";
-                const primaryAssociation = Array.isArray(client.associations) && client.associations.length ? client.associations[0] : null;
-                const throughput = primaryAssociation
-                    ? "rx " + formatRate(primaryAssociation.rx_bps) + " / tx " + formatRate(primaryAssociation.tx_bps)
+                var hostname = client.hostname || "---";
+                var ipAddress = client.ip_address || "---";
+                var description = client.description_guess || "---";
+                var primaryAssociation = Array.isArray(client.associations) && client.associations.length ? client.associations[0] : null;
+                var throughput = primaryAssociation
+                    ? "rx " + openwrtAdminFormatRate(primaryAssociation.rx_bps) + " / tx " + openwrtAdminFormatRate(primaryAssociation.tx_bps)
                     : "---";
-                const totals = primaryAssociation
+                var totals = primaryAssociation
                     ? "rx " + formatBytes(primaryAssociation.rx_bytes) + " / tx " + formatBytes(primaryAssociation.tx_bytes)
                     : "---";
 
@@ -143,26 +129,11 @@
             });
         }
 
-        function updateBrokerBanner() {
-            ajaxCall("/api/openwrtadmin/service/status/", {}, function(data) {
-                const broker = data.broker || null;
-                if (broker && broker.ok && broker.body) {
-                    brokerBanner.addClass("hidden").text("");
-                    return;
-                }
-
-                const serviceState = data.service || "unknown";
-                brokerBanner
-                    .removeClass("hidden")
-                    .text("PHP cannot reach the OpenWrt Admin broker on 127.0.0.1:9783. Service status: " + serviceState + ".");
-            });
-        }
-
         function refreshClientStats() {
-            updateBrokerBanner();
+            openwrtAdminUpdateBrokerBanner(brokerBanner);
             ajaxCall("/api/openwrtadmin/service/clients/", {}, function(data) {
                 renderRows(Array.isArray(data.clients) ? data.clients : []);
-                statusLine.text("Updated " + new Date().toLocaleTimeString());
+                statusLine.text("{{ lang._('Updated') }} " + new Date().toLocaleTimeString());
             });
         }
 

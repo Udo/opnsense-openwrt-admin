@@ -1,63 +1,36 @@
+{{ partial("OPNsense/OpenWrtAdmin/_js_utils") }}
+
 <script>
     $(document).ready(function() {
-        const editDialogId = "#{{ formGridRouter['edit_dialog_id'] }}";
-        const gridId = "#{{ formGridRouter['table_id'] }}";
-        const sshKeyFieldId = "router\\.ssh_key_ref";
-        const configSyncFields = [
-            {type: "wifi", fieldId: "router\\.sync_wifi_config_from", restoreLabel: "{{ lang._('Restore wifi backup') }}"},
+        var editDialogId = "#{{ formGridRouter['edit_dialog_id'] }}";
+        var gridId = "#{{ formGridRouter['table_id'] }}";
+        var sshKeyFieldId = "router\\.ssh_key_ref";
+        var configSyncFields = [
+            {type: "wifi", fieldId: "router\\.sync_wifi_config_from", restoreLabel: "{{ lang._('Restore Wi-Fi backup') }}"},
             {type: "system", fieldId: "router\\.sync_system_config_from", restoreLabel: "{{ lang._('Restore system backup') }}"},
             {type: "firewall", fieldId: "router\\.sync_firewall_config_from", restoreLabel: "{{ lang._('Restore firewall backup') }}"},
-            {type: "dhcp", fieldId: "router\\.sync_dhcp_config_from", restoreLabel: "{{ lang._('Restore dhcp backup') }}"},
-            {type: "rpcd", fieldId: "router\\.sync_rpcd_config_from", restoreLabel: "{{ lang._('Restore rpcd backup') }}"}
+            {type: "dhcp", fieldId: "router\\.sync_dhcp_config_from", restoreLabel: "{{ lang._('Restore DHCP backup') }}"},
+            {type: "rpcd", fieldId: "router\\.sync_rpcd_config_from", restoreLabel: "{{ lang._('Restore authentication (rpcd) backup') }}"}
         ];
-        const routerAddressFieldId = "router\\.address";
-        const routerStatusFieldId = "router\\.status";
-        const routerVersionFieldId = "router\\.version";
-        const routerHardwareFieldId = "router\\.hardware";
-        const routerSyncStatusFieldId = "router\\.sync_status";
-        const brokerBannerId = "#openwrtAdminBrokerBanner";
-        const bulkActionStatusId = "#openwrtAdminBulkActionStatus";
-        const bulkActionStatusClasses = "alert alert-danger alert-info alert-success hidden";
-        const bulkActionButtonIds = "#bulkRebootRoutersBtn, #bulkRadiosOnBtn, #bulkRadiosOffBtn, #bulkSyncRoutersBtn";
-        let currentEditRouterUuid = null;
-        let runtimeRouters = [];
-
-        function copyTextToClipboard(text) {
-            if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-                return navigator.clipboard.writeText(text);
-            }
-
-            const deferred = $.Deferred();
-            const temp = $("<textarea>")
-                .css({position: "fixed", top: "-1000px", left: "-1000px"})
-                .val(text)
-                .appendTo("body");
-
-            temp.trigger("focus").trigger("select");
-
-            try {
-                if (document.execCommand("copy")) {
-                    deferred.resolve();
-                } else {
-                    deferred.reject();
-                }
-            } catch (e) {
-                deferred.reject(e);
-            } finally {
-                temp.remove();
-            }
-
-            return deferred.promise();
-        }
+        var routerAddressFieldId = "router\\.address";
+        var routerStatusFieldId = "router\\.status";
+        var routerVersionFieldId = "router\\.version";
+        var routerHardwareFieldId = "router\\.hardware";
+        var routerSyncStatusFieldId = "router\\.sync_status";
+        var brokerBannerId = "#openwrtAdminBrokerBanner";
+        var bulkActionStatusId = "#openwrtAdminBulkActionStatus";
+        var bulkActionButtonIds = "#bulkRebootRoutersBtn, #bulkRadiosOnBtn, #bulkRadiosOffBtn, #bulkSyncRoutersBtn";
+        var currentEditRouterUuid = null;
+        var runtimeRouters = [];
 
         function updateCopyButtonState() {
-            const hasValue = $("#" + sshKeyFieldId).val() !== "";
+            var hasValue = $("#" + sshKeyFieldId).val() !== "";
             $("#copySshPublicKeyBtn").prop("disabled", !hasValue);
             $("#openRouterSshKeysPageBtn").prop("disabled", $("#" + routerAddressFieldId).val() === "");
         }
 
         function ensureCopyButton() {
-            const target = $("#select_" + sshKeyFieldId);
+            var target = $("#select_" + sshKeyFieldId);
             if (target.length === 0 || $("#copySshPublicKeyBtn").length > 0) {
                 updateCopyButtonState();
                 return;
@@ -79,7 +52,7 @@
 
         function ensureRestoreControls() {
             configSyncFields.forEach(function(config) {
-                const target = $("#select_" + config.fieldId);
+                var target = $("#select_" + config.fieldId);
                 if (target.length === 0 || $("#restore" + config.type + "BackupBtn").length > 0) {
                     return;
                 }
@@ -109,8 +82,8 @@
         }
 
         function currentRuntimeRouter() {
-            const address = $("#" + routerAddressFieldId).val();
-            let current = null;
+            var address = $("#" + routerAddressFieldId).val();
+            var current = null;
             if (currentEditRouterUuid) {
                 current = runtimeRouters.find(function(item) {
                     return item.router_uuid === currentEditRouterUuid;
@@ -129,7 +102,7 @@
                 return currentEditRouterUuid;
             }
 
-            const current = currentRuntimeRouter();
+            var current = currentRuntimeRouter();
             if (current && current.router_uuid) {
                 currentEditRouterUuid = current.router_uuid;
                 return currentEditRouterUuid;
@@ -140,13 +113,13 @@
 
         function updateSyncSourceOptions() {
             configSyncFields.forEach(function(config) {
-                const select = $("#" + config.fieldId);
+                var select = $("#" + config.fieldId);
                 if (!select.length) {
                     return;
                 }
 
                 if (!select.data("all-options")) {
-                    const allOptions = [];
+                    var allOptions = [];
                     select.find("option").each(function() {
                         allOptions.push({
                             value: $(this).attr("value") || "",
@@ -156,10 +129,10 @@
                     select.data("all-options", allOptions);
                 }
 
-                const current = currentRuntimeRouter();
-                const currentModel = current && current.hardware_model ? current.hardware_model : "";
-                const selectedValue = select.val() || "";
-                const runtimeByUuid = {};
+                var current = currentRuntimeRouter();
+                var currentModel = current && current.hardware_model ? current.hardware_model : "";
+                var selectedValue = select.val() || "";
+                var runtimeByUuid = {};
                 runtimeRouters.forEach(function(item) {
                     if (item.router_uuid) {
                         runtimeByUuid[item.router_uuid] = item;
@@ -173,12 +146,12 @@
                         return;
                     }
 
-                    const editingUuid = effectiveEditRouterUuid();
+                    var editingUuid = effectiveEditRouterUuid();
                     if (editingUuid && option.value === editingUuid) {
                         return;
                     }
 
-                    const candidate = runtimeByUuid[option.value] || null;
+                    var candidate = runtimeByUuid[option.value] || null;
                     if (currentModel !== "" && (!candidate || candidate.hardware_model !== currentModel)) {
                         return;
                     }
@@ -198,16 +171,32 @@
             });
         }
 
+        function formatBackupLabel(item) {
+            var ts = item.last_seen_at || item.created_at || "";
+            var date = ts ? new Date(ts).toLocaleString() : "?";
+            var hash = (item.content_hash || "").slice(0, 12);
+            var bytes = item.size_bytes || 0;
+            var size;
+            if (bytes >= 1048576) {
+                size = (bytes / 1048576).toFixed(1) + " MB";
+            } else if (bytes >= 1024) {
+                size = (bytes / 1024).toFixed(1) + " KB";
+            } else {
+                size = bytes + " B";
+            }
+            return date + " \u2014 " + hash + " \u2014 " + size;
+        }
+
         function loadRestoreBackups(configType) {
-            const backupSelect = $("#openwrtAdminRestoreBackupSelect_" + configType);
-            const backupStatus = $("#openwrtAdminRestoreBackupStatus_" + configType);
-            const restoreButton = $("#restore" + configType + "BackupBtn");
+            var backupSelect = $("#openwrtAdminRestoreBackupSelect_" + configType);
+            var backupStatus = $("#openwrtAdminRestoreBackupStatus_" + configType);
+            var restoreButton = $("#restore" + configType + "BackupBtn");
 
             if (!backupSelect.length) {
                 return;
             }
 
-            const routerUuid = effectiveEditRouterUuid();
+            var routerUuid = effectiveEditRouterUuid();
             if (!routerUuid) {
                 backupSelect.empty().append($("<option>").text("{{ lang._('Save the router first to enable restore.') }}"));
                 restoreButton.prop("disabled", true);
@@ -218,7 +207,7 @@
             backupStatus.text("{{ lang._('Loading backups...') }}");
             ajaxCall("/api/openwrtadmin/service/config_backups/", {router_uuid: routerUuid, config_type: configType}, function(data) {
                 backupSelect.empty();
-                const backups = Array.isArray(data.backups) ? data.backups : [];
+                var backups = Array.isArray(data.backups) ? data.backups : [];
                 if (!backups.length) {
                     backupSelect.append($("<option>").text("{{ lang._('No backups stored yet.') }}").attr("value", ""));
                     restoreButton.prop("disabled", true);
@@ -227,10 +216,7 @@
                 }
 
                 backups.forEach(function(item) {
-                    const label = (item.last_seen_at || item.created_at || "") +
-                        " | " + (item.content_hash || "").slice(0, 12) +
-                        " | " + (item.size_bytes || 0) + " B";
-                    backupSelect.append($("<option>").attr("value", item.content_hash).text(label));
+                    backupSelect.append($("<option>").attr("value", item.content_hash).text(formatBackupLabel(item)));
                 });
                 restoreButton.prop("disabled", false);
                 backupStatus.text("");
@@ -244,29 +230,14 @@
             $("#" + routerSyncStatusFieldId).closest(".form-group, tr").hide();
         }
 
-        function updateBrokerBanner() {
-            ajaxCall("/api/openwrtadmin/service/status/", {}, function(data) {
-                const broker = data.broker || null;
-                if (broker && broker.ok && broker.body) {
-                    $(brokerBannerId).addClass("hidden").text("");
-                    return;
-                }
-
-                const serviceState = data.service || "unknown";
-                $(brokerBannerId)
-                    .removeClass("hidden")
-                    .text("PHP cannot reach the OpenWrt Admin broker on 127.0.0.1:9783. Service status: " + serviceState + ".");
-            });
-        }
-
         function selectedRouterIds() {
             return $(gridId).bootgrid("getSelectedRows") || [];
         }
 
         function routerRowData(rowId) {
-            const bootgrid = $(gridId).data("UIBootgrid");
+            var bootgrid = $(gridId).data("UIBootgrid");
             if (bootgrid && bootgrid.table) {
-                const row = bootgrid.table.getRow(rowId);
+                var row = bootgrid.table.getRow(rowId);
                 if (row) {
                     return row.getData();
                 }
@@ -282,15 +253,15 @@
         }
 
         function setBulkActionStatus(message, level) {
-            const node = $(bulkActionStatusId);
-            node.removeClass(bulkActionStatusClasses);
+            var node = $(bulkActionStatusId);
+            node.removeClass("alert alert-danger alert-info alert-success hidden");
             if (!message) {
                 node.addClass("hidden").text("");
                 return;
             }
 
-            const cssClass = level === "success"
-                ? "alert alert-info"
+            var cssClass = level === "success"
+                ? "alert alert-success"
                 : level === "error"
                     ? "alert alert-danger"
                     : "alert alert-info";
@@ -303,32 +274,32 @@
         }
 
         function performBulkAction(action, title, prompt) {
-            const routers = selectedRouterIds();
+            var routers = selectedRouterIds();
             if (!routers.length) {
-                setBulkActionStatus("Select at least one router.", "error");
+                setBulkActionStatus("{{ lang._('Select at least one router.') }}", "error");
                 updateBulkActionButtons();
                 return;
             }
 
             stdDialogConfirm(title, prompt, "{{ lang._('Yes') }}", "{{ lang._('Cancel') }}", function() {
-                setBulkActionStatus("Running " + title.toLowerCase() + "...", "info");
+                setBulkActionStatus("{{ lang._('Running') }} " + title.toLowerCase() + "...", "info");
                 $(bulkActionButtonIds).prop("disabled", true);
                 ajaxCall("/api/openwrtadmin/service/bulk_action/", {action: action, routers: routers}, function(data) {
-                    const failed = Array.isArray(data.results)
+                    var failed = Array.isArray(data.results)
                         ? data.results.filter(function(item) { return !item.ok; })
                         : [];
 
                     if ((data.status || "") !== "ok") {
-                        setBulkActionStatus(data.message || "Bulk action failed.", "error");
+                        setBulkActionStatus(data.message || "{{ lang._('Bulk action failed.') }}", "error");
                     } else if (failed.length) {
-                        const details = failed.map(function(item) {
+                        var details = failed.map(function(item) {
                             return (item.address || item.router_uuid || "router") + ": " + (item.message || "error");
                         }).join("; ");
-                        setBulkActionStatus((data.successful || 0) + " ok, " + failed.length + " failed. " + details, "error");
+                        setBulkActionStatus((data.successful || 0) + " {{ lang._('ok') }}, " + failed.length + " {{ lang._('failed.') }} " + details, "error");
                     } else if (action === "sync_configs") {
-                        setBulkActionStatus((data.changed || 0) + " router(s) synced.", "success");
+                        setBulkActionStatus((data.changed || 0) + " {{ lang._('router(s) synced.') }}", "success");
                     } else {
-                        setBulkActionStatus((data.successful || 0) + " router(s) updated.", "success");
+                        setBulkActionStatus((data.successful || 0) + " {{ lang._('router(s) updated.') }}", "success");
                     }
 
                     updateBulkActionButtons();
@@ -348,9 +319,9 @@
             commands: {
                 openui: {
                     method: function(event) {
-                        const rowId = $(event.currentTarget).data("row-id");
-                        const row = routerRowData(rowId);
-                        const address = row && row.address ? row.address : "";
+                        var rowId = $(event.currentTarget).data("row-id");
+                        var row = routerRowData(rowId);
+                        var address = row && row.address ? row.address : "";
                         if (!address) {
                             return;
                         }
@@ -369,7 +340,7 @@
                 keepSelection: true,
                 formatters: {
                     sync_status: function(column, row) {
-                        const value = row.sync_status || "";
+                        var value = row.sync_status || "";
                         if (!value) {
                             return "";
                         }
@@ -391,13 +362,13 @@
             updateBulkActionButtons();
         });
 
-        updateBrokerBanner();
+        openwrtAdminUpdateBrokerBanner(brokerBannerId);
         updateBulkActionIcons();
         updateBulkActionButtons();
         loadRuntimeRouters();
 
         window.setInterval(function() {
-            updateBrokerBanner();
+            openwrtAdminUpdateBrokerBanner(brokerBannerId);
             if (!$(editDialogId).is(":visible")) {
                 $(gridId).bootgrid("reload");
             }
@@ -441,36 +412,36 @@
         });
 
         $(document).on("click", "#copySshPublicKeyBtn", function() {
-            const ref = $("#" + sshKeyFieldId).val();
+            var ref = $("#" + sshKeyFieldId).val();
             if (!ref) {
-                $("#copySshPublicKeyStatus").text("No key selected.");
+                $("#copySshPublicKeyStatus").text("{{ lang._('No key selected.') }}");
                 updateCopyButtonState();
                 return;
             }
 
             ajaxCall("/api/openwrtadmin/settings/get_ssh_public_key/", {ref: ref}, function(data) {
                 if (data.status !== "ok" || !data.public_key) {
-                    $("#copySshPublicKeyStatus").text("Unable to load key.");
+                    $("#copySshPublicKeyStatus").text("{{ lang._('Unable to load key.') }}");
                     return;
                 }
 
-                copyTextToClipboard(data.public_key).then(function() {
-                    $("#copySshPublicKeyStatus").text("Copied.");
+                openwrtAdminCopyToClipboard(data.public_key).then(function() {
+                    $("#copySshPublicKeyStatus").text("{{ lang._('Copied.') }}");
                 }).catch(function() {
-                    $("#copySshPublicKeyStatus").text("Clipboard access failed.");
+                    $("#copySshPublicKeyStatus").text("{{ lang._('Clipboard access failed.') }}");
                 });
             });
         });
 
         $(document).on("click", "#openRouterSshKeysPageBtn", function() {
-            const address = $("#" + routerAddressFieldId).val();
+            var address = $("#" + routerAddressFieldId).val();
             if (!address) {
-                $("#copySshPublicKeyStatus").text("No router address set.");
+                $("#copySshPublicKeyStatus").text("{{ lang._('No router address set.') }}");
                 updateCopyButtonState();
                 return;
             }
 
-            const url = "http://" + address + "/cgi-bin/luci/admin/system/admin/sshkeys";
+            var url = "http://" + address + "/cgi-bin/luci/admin/system/admin/sshkeys";
             window.open(url, "_blank", "noopener");
         });
 
@@ -491,19 +462,19 @@
         });
 
         $(document).on("click", ".openwrtAdminRestoreBackupBtn", function() {
-            const configType = $(this).data("config-type");
-            const contentHash = $("#openwrtAdminRestoreBackupSelect_" + configType).val();
-            const statusSelector = "#openwrtAdminRestoreBackupStatus_" + configType;
-            const prettyType = configType === "wifi" ? "Wi-Fi" : configType;
-            const routerUuid = effectiveEditRouterUuid();
+            var configType = $(this).data("config-type");
+            var contentHash = $("#openwrtAdminRestoreBackupSelect_" + configType).val();
+            var statusSelector = "#openwrtAdminRestoreBackupStatus_" + configType;
+            var prettyType = configType === "wifi" ? "Wi-Fi" : configType;
+            var routerUuid = effectiveEditRouterUuid();
             if (!routerUuid || !contentHash) {
                 $(statusSelector).text("{{ lang._('No backup selected.') }}");
                 return;
             }
 
             stdDialogConfirm(
-                "Restore " + prettyType + " backup",
-                "Restore the selected " + prettyType + " backup to this router?",
+                "{{ lang._('Restore backup') }}",
+                "{{ lang._('Restore the selected backup to this router? The current config will be overwritten.') }}",
                 "{{ lang._('Yes') }}",
                 "{{ lang._('Cancel') }}",
                 function() {
@@ -527,7 +498,7 @@
 </script>
 
 <div class="content-box">
-    <div class="alert alert-danger hidden" id="openwrtAdminBrokerBanner"></div>
+    <div class="alert alert-warning hidden" id="openwrtAdminBrokerBanner"></div>
     <div class="hidden" id="openwrtAdminBulkActionStatus"></div>
     {{ partial('layout_partials/base_bootgrid_table', formGridRouter + {
         'command_width': '135',

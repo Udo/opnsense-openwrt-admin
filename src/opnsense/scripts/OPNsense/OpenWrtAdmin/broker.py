@@ -26,11 +26,13 @@ CONTROL_SOCKET_DIR = DATA_DIR / "control"
 KNOWN_HOSTS_PATH = DATA_DIR / "known_hosts"
 CONFIG_XML_PATH = Path("/conf/config.xml")
 LOG_PREFIX = "[openwrt-admind]"
-POLL_INTERVAL_SECONDS = 60
-SSH_CONNECT_TIMEOUT_SECONDS = 1
-SSH_COMMAND_TIMEOUT_SECONDS = 4
+# Defaults — all overridden at runtime by values in config.xml settings.
+DEFAULT_POLL_INTERVAL_SECONDS = 60
+DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS = 5
+DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS = 15
 SSH_CONTROL_PERSIST_SECONDS = 120
-MAX_PARALLEL_POLLS = 8
+DEFAULT_MAX_PARALLEL_POLLS = 8
+DEFAULT_CONFIG_BACKUP_LIMIT = 8
 MANAGED_KEY_REF = "managed:openwrt-admin"
 MANAGED_KEY_PATH = KEY_DIR / "managed_ed25519"
 WIRELESS_CONFIG_PATH = "/etc/config/wireless"
@@ -38,7 +40,6 @@ SYSTEM_CONFIG_PATH = "/etc/config/system"
 FIREWALL_CONFIG_PATH = "/etc/config/firewall"
 DHCP_CONFIG_PATH = "/etc/config/dhcp"
 RPCD_CONFIG_PATH = "/etc/config/rpcd"
-WIRELESS_BACKUP_LIMIT = 8
 CONFIG_TYPES = ("wifi", "system", "firewall", "dhcp", "rpcd")
 
 
@@ -120,13 +121,38 @@ class BrokerState:
     def __init__(self):
         self.lock = threading.Lock()
         self.shutdown_event = threading.Event()
-        self.executor = ThreadPoolExecutor(max_workers=MAX_PARALLEL_POLLS)
         self.current_poll = None
         self.last_poll_started = None
         self.last_poll_finished = None
         self.last_poll_summary = {"status": "idle"}
         self._ensure_paths()
+        self._load_tuning()
+        self.executor = ThreadPoolExecutor(max_workers=self._max_parallel_polls)
         self._init_db()
+
+    def _load_tuning(self):
+        """Read tunable values from config.xml; fall back to defaults if absent or invalid."""
+        try:
+            config = self.load_config()
+            s = config.get("settings", {})
+
+            def _int(key, default, lo, hi):
+                try:
+                    return max(lo, min(hi, int(s.get(key) or default)))
+                except (TypeError, ValueError):
+                    return default
+
+            self._poll_interval = _int("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS, 10, 3600)
+            self._ssh_connect_timeout = _int("ssh_connect_timeout_seconds", DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS, 1, 30)
+            self._ssh_command_timeout = _int("ssh_command_timeout_seconds", DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS, 2, 120)
+            self._max_parallel_polls = _int("max_parallel_polls", DEFAULT_MAX_PARALLEL_POLLS, 1, 64)
+            self._config_backup_limit = _int("config_backup_limit", DEFAULT_CONFIG_BACKUP_LIMIT, 1, 50)
+        except Exception:
+            self._poll_interval = DEFAULT_POLL_INTERVAL_SECONDS
+            self._ssh_connect_timeout = DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS
+            self._ssh_command_timeout = DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS
+            self._max_parallel_polls = DEFAULT_MAX_PARALLEL_POLLS
+            self._config_backup_limit = DEFAULT_CONFIG_BACKUP_LIMIT
 
     def _ensure_paths(self):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -138,6 +164,7 @@ class BrokerState:
 
     def _db(self):
         conn = sqlite3.connect(DB_PATH)
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -283,6 +310,11 @@ class BrokerState:
             "managed_private_key": "",
             "managed_public_key": "",
             "managed_key_comment": "",
+            "poll_interval_seconds": "",
+            "ssh_connect_timeout_seconds": "",
+            "ssh_command_timeout_seconds": "",
+            "max_parallel_polls": "",
+            "config_backup_limit": "",
         }
         if settings_node is not None:
             for key in settings.keys():
@@ -301,6 +333,7 @@ class BrokerState:
                         "address": (router.findtext("address") or "").strip(),
                         "hostname": (router.findtext("hostname") or "").strip(),
                         "description": (router.findtext("description") or "").strip(),
+                        "ssh_username": (router.findtext("ssh_username") or "root").strip() or "root",
                         "ssh_key_ref": (router.findtext("ssh_key_ref") or "").strip(),
                         "sync_wifi_config_from": (router.findtext("sync_wifi_config_from") or "").strip(),
                         "sync_system_config_from": (router.findtext("sync_system_config_from") or "").strip(),
@@ -529,17 +562,17 @@ class BrokerState:
 
         return [item for item in associations if item["client_mac"]]
 
-    def control_socket_path(self, address, private_key):
-        digest = hashlib.sha1(f"{address}|{private_key}".encode("utf-8")).hexdigest()[:20]
+    def control_socket_path(self, address, private_key, username="root"):
+        digest = hashlib.sha1(f"{username}@{address}|{private_key}".encode("utf-8")).hexdigest()[:20]
         return CONTROL_SOCKET_DIR / f"cm-{digest}"
 
-    def ssh_base_command(self, address, private_key, control_path):
+    def ssh_base_command(self, address, private_key, control_path, username="root"):
         return [
             "ssh",
             "-i",
             private_key,
             "-o",
-            f"ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}",
+            f"ConnectTimeout={self._ssh_connect_timeout}",
             "-o",
             "ConnectionAttempts=1",
             "-o",
@@ -566,11 +599,11 @@ class BrokerState:
             f"ControlPersist={SSH_CONTROL_PERSIST_SECONDS}",
             "-o",
             f"ControlPath={control_path}",
-            f"root@{address}",
+            f"{username}@{address}",
         ]
 
     def should_reset_control_socket(self, message, control_path):
-        if not control_path.exists():
+        if not control_path.is_socket() and not control_path.exists():
             return False
 
         lowered = (message or "").lower()
@@ -593,9 +626,9 @@ class BrokerState:
         except OSError:
             pass
 
-    def run_ssh(self, address, private_key, remote_args, allow_retry=True, input_text=None, strip_output=True):
-        control_path = self.control_socket_path(address, private_key)
-        command = self.ssh_base_command(address, private_key, control_path) + remote_args
+    def run_ssh(self, address, private_key, remote_args, allow_retry=True, input_text=None, strip_output=True, username="root"):
+        control_path = self.control_socket_path(address, private_key, username)
+        command = self.ssh_base_command(address, private_key, control_path, username) + remote_args
         started = time.monotonic()
         try:
             proc = subprocess.run(
@@ -603,7 +636,7 @@ class BrokerState:
                 capture_output=True,
                 text=True,
                 input=input_text,
-                timeout=SSH_COMMAND_TIMEOUT_SECONDS,
+                timeout=self._ssh_command_timeout,
                 check=False,
             )
         except subprocess.TimeoutExpired:
@@ -636,184 +669,71 @@ class BrokerState:
                 allow_retry=False,
                 input_text=input_text,
                 strip_output=strip_output,
+                username=username,
             )
             retry_result["latency_ms"] += latency
             return retry_result
 
         return result
 
+    def _make_error_result(self, router_uuid, status_text, last_error, latency_ms=None):
+        return {
+            "router_uuid": router_uuid,
+            "reachable": 0,
+            "status_text": status_text,
+            "version": "",
+            "hardware_model": "",
+            "detected_hostname": "",
+            "load_1m": None,
+            "uptime_seconds": None,
+            "memory_used_pct": None,
+            "wifi_clients": None,
+            "wifi_clients_by_radio": None,
+            "wifi_clients_by_network": None,
+            "best_signal_dbm": None,
+            "worst_signal_dbm": None,
+            "signal_histogram": None,
+            "latency_ms": latency_ms,
+            "last_seen": None,
+            "last_error": last_error,
+            "updated_at": now_iso(),
+            "client_associations": [],
+        }
+
     def poll_router(self, router, settings):
         address = router["address"]
+        username = router.get("ssh_username") or "root"
         private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
-        updated_at = now_iso()
+        router_uuid = router["router_uuid"]
 
         if not address:
-            return {
-                "router_uuid": router["router_uuid"],
-                "reachable": 0,
-                "status_text": "Invalid",
-                "version": "",
-                "hardware_model": "",
-                "detected_hostname": "",
-                "load_1m": None,
-                "uptime_seconds": None,
-                "memory_used_pct": None,
-                "wifi_clients": None,
-                "wifi_clients_by_radio": None,
-                "wifi_clients_by_network": None,
-                "best_signal_dbm": None,
-                "worst_signal_dbm": None,
-                "signal_histogram": None,
-                "latency_ms": None,
-                "last_seen": None,
-                "last_error": "Missing router address.",
-                "updated_at": updated_at,
-            }
+            return self._make_error_result(router_uuid, "Invalid", "Missing router address.")
 
         if not private_key:
-            return {
-                "router_uuid": router["router_uuid"],
-                "reachable": 0,
-                "status_text": "Key error",
-                "version": "",
-                "hardware_model": "",
-                "detected_hostname": "",
-                "load_1m": None,
-                "uptime_seconds": None,
-                "memory_used_pct": None,
-                "wifi_clients": None,
-                "wifi_clients_by_radio": None,
-                "wifi_clients_by_network": None,
-                "best_signal_dbm": None,
-                "worst_signal_dbm": None,
-                "signal_histogram": None,
-                "latency_ms": None,
-                "last_seen": None,
-                "last_error": "No usable SSH private key available.",
-                "updated_at": updated_at,
-            }
+            return self._make_error_result(router_uuid, "Key error", "No usable SSH private key available.")
 
-        board_result = self.run_ssh(address, private_key, ["ubus", "call", "system", "board"])
+        board_result = self.run_ssh(address, private_key, ["ubus", "call", "system", "board"], username=username)
         if board_result["timed_out"]:
-            return {
-                "router_uuid": router["router_uuid"],
-                "reachable": 0,
-                "status_text": "Connection timed out",
-                "version": "",
-                "hardware_model": "",
-                "detected_hostname": "",
-                "load_1m": None,
-                "uptime_seconds": None,
-                "memory_used_pct": None,
-                "wifi_clients": None,
-                "wifi_clients_by_radio": None,
-                "wifi_clients_by_network": None,
-                "best_signal_dbm": None,
-                "worst_signal_dbm": None,
-                "signal_histogram": None,
-                "latency_ms": board_result["latency_ms"],
-                "last_seen": None,
-                "last_error": "SSH status command timed out.",
-                "updated_at": updated_at,
-            }
+            return self._make_error_result(router_uuid, "Connection timed out", "SSH status command timed out.", board_result["latency_ms"])
 
         if not board_result["ok"]:
             last_error = board_result["stderr"] or board_result["stdout"] or f"ssh exited with code {board_result['returncode']}"
-            return {
-                "router_uuid": router["router_uuid"],
-                "reachable": 0,
-                "status_text": classify_ssh_error(last_error),
-                "version": "",
-                "hardware_model": "",
-                "detected_hostname": "",
-                "load_1m": None,
-                "uptime_seconds": None,
-                "memory_used_pct": None,
-                "wifi_clients": None,
-                "wifi_clients_by_radio": None,
-                "wifi_clients_by_network": None,
-                "best_signal_dbm": None,
-                "worst_signal_dbm": None,
-                "signal_histogram": None,
-                "latency_ms": board_result["latency_ms"],
-                "last_seen": None,
-                "last_error": last_error,
-                "updated_at": updated_at,
-            }
+            return self._make_error_result(router_uuid, classify_ssh_error(last_error), last_error, board_result["latency_ms"])
 
-        system_info_result = self.run_ssh(address, private_key, ["ubus", "call", "system", "info"])
+        system_info_result = self.run_ssh(address, private_key, ["ubus", "call", "system", "info"], username=username)
+        latency = board_result["latency_ms"] + system_info_result["latency_ms"]
         if system_info_result["timed_out"]:
-            return {
-                "router_uuid": router["router_uuid"],
-                "reachable": 0,
-                "status_text": "Connection timed out",
-                "version": "",
-                "hardware_model": "",
-                "detected_hostname": "",
-                "load_1m": None,
-                "uptime_seconds": None,
-                "memory_used_pct": None,
-                "wifi_clients": None,
-                "wifi_clients_by_radio": None,
-                "wifi_clients_by_network": None,
-                "best_signal_dbm": None,
-                "worst_signal_dbm": None,
-                "signal_histogram": None,
-                "latency_ms": board_result["latency_ms"] + system_info_result["latency_ms"],
-                "last_seen": None,
-                "last_error": "SSH status command timed out.",
-                "updated_at": updated_at,
-            }
+            return self._make_error_result(router_uuid, "Connection timed out", "SSH status command timed out.", latency)
 
         if not system_info_result["ok"]:
             last_error = system_info_result["stderr"] or system_info_result["stdout"] or f"ssh exited with code {system_info_result['returncode']}"
-            return {
-                "router_uuid": router["router_uuid"],
-                "reachable": 0,
-                "status_text": classify_ssh_error(last_error),
-                "version": "",
-                "hardware_model": "",
-                "detected_hostname": "",
-                "load_1m": None,
-                "uptime_seconds": None,
-                "memory_used_pct": None,
-                "wifi_clients": None,
-                "wifi_clients_by_radio": None,
-                "wifi_clients_by_network": None,
-                "best_signal_dbm": None,
-                "worst_signal_dbm": None,
-                "signal_histogram": None,
-                "latency_ms": board_result["latency_ms"] + system_info_result["latency_ms"],
-                "last_seen": None,
-                "last_error": last_error,
-                "updated_at": updated_at,
-            }
+            return self._make_error_result(router_uuid, classify_ssh_error(last_error), last_error, latency)
 
         try:
             payload = json.loads(board_result["stdout"])
             system_info = json.loads(system_info_result["stdout"])
         except json.JSONDecodeError:
-            return {
-                "router_uuid": router["router_uuid"],
-                "reachable": 0,
-                "status_text": "Protocol error",
-                "version": "",
-                "hardware_model": "",
-                "detected_hostname": "",
-                "load_1m": None,
-                "uptime_seconds": None,
-                "memory_used_pct": None,
-                "wifi_clients": None,
-                "wifi_clients_by_radio": None,
-                "wifi_clients_by_network": None,
-                "best_signal_dbm": None,
-                "worst_signal_dbm": None,
-                "signal_histogram": None,
-                "latency_ms": board_result["latency_ms"] + system_info_result["latency_ms"],
-                "last_seen": None,
-                "last_error": "Unable to parse OpenWrt ubus output.",
-                "updated_at": updated_at,
-            }
+            return self._make_error_result(router_uuid, "Protocol error", "Unable to parse OpenWrt ubus output.", latency)
 
         wifi_clients = None
         wifi_clients_by_radio = None
@@ -824,8 +744,7 @@ class BrokerState:
             "signal_histogram": None,
         }
         client_associations = []
-        latency = board_result["latency_ms"] + system_info_result["latency_ms"]
-        hostapd_list_result = self.run_ssh(address, private_key, ["ubus", "list", "hostapd.*"])
+        hostapd_list_result = self.run_ssh(address, private_key, ["ubus", "list", "hostapd.*"], username=username)
         latency += hostapd_list_result["latency_ms"]
         if hostapd_list_result["timed_out"]:
             wifi_clients = None
@@ -834,7 +753,7 @@ class BrokerState:
             interfaces = [line.strip() for line in hostapd_list_result["stdout"].splitlines() if line.strip()]
             for iface in interfaces:
                 network_name = iface.split(".", 1)[1] if "." in iface else iface
-                status_result = self.run_ssh(address, private_key, ["ubus", "call", iface, "get_status"])
+                status_result = self.run_ssh(address, private_key, ["ubus", "call", iface, "get_status"], username=username)
                 latency += status_result["latency_ms"]
                 if status_result["ok"] and not status_result["timed_out"] and status_result["stdout"]:
                     try:
@@ -842,7 +761,7 @@ class BrokerState:
                         network_name = str(status_payload.get("ssid") or network_name)
                     except json.JSONDecodeError:
                         pass
-                clients_result = self.run_ssh(address, private_key, ["ubus", "call", iface, "get_clients"])
+                clients_result = self.run_ssh(address, private_key, ["ubus", "call", iface, "get_clients"], username=username)
                 latency += clients_result["latency_ms"]
                 if not clients_result["ok"] or clients_result["timed_out"] or not clients_result["stdout"]:
                     continue
@@ -1048,6 +967,7 @@ class BrokerState:
 
     def perform_router_action(self, router, settings, action):
         address = router["address"]
+        username = router.get("ssh_username") or "root"
         private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
         command = self.router_action_command(action)
 
@@ -1075,7 +995,7 @@ class BrokerState:
                 "message": "Unsupported action.",
             }
 
-        result = self.run_ssh(address, private_key, command)
+        result = self.run_ssh(address, private_key, command, username=username)
         if result["timed_out"]:
             return {
                 "router_uuid": router["router_uuid"],
@@ -1173,45 +1093,6 @@ class BrokerState:
         trailing_newline = "\n" if source_content.endswith("\n") else ""
         return "\n".join(merged_lines) + trailing_newline
 
-    def store_wireless_config(self, router_uuid, content, fetched_at):
-        content_hash = self.hash_content(content)
-        with self._db_context() as conn:
-            conn.execute(
-                """
-                INSERT INTO router_wireless_state (router_uuid, content_hash, content, fetched_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(router_uuid) DO UPDATE SET
-                    content_hash=excluded.content_hash,
-                    content=excluded.content,
-                    fetched_at=excluded.fetched_at
-                """,
-                (router_uuid, content_hash, content, fetched_at),
-            )
-            conn.execute(
-                """
-                INSERT INTO router_wireless_backup (router_uuid, content_hash, content, created_at, last_seen_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(router_uuid, content_hash) DO UPDATE SET
-                    last_seen_at=excluded.last_seen_at
-                """,
-                (router_uuid, content_hash, content, fetched_at, fetched_at),
-            )
-            stale_rows = conn.execute(
-                """
-                SELECT content_hash FROM router_wireless_backup
-                WHERE router_uuid=?
-                ORDER BY last_seen_at DESC, created_at DESC
-                LIMIT -1 OFFSET ?
-                """,
-                (router_uuid, WIRELESS_BACKUP_LIMIT),
-            ).fetchall()
-            for row in stale_rows:
-                conn.execute(
-                    "DELETE FROM router_wireless_backup WHERE router_uuid=? AND content_hash=?",
-                    (router_uuid, row["content_hash"]),
-                )
-        return content_hash
-
     def store_config_snapshot(self, router_uuid, config_type, content, fetched_at):
         content_hash = self.hash_content(content)
         with self._db_context() as conn:
@@ -1242,19 +1123,14 @@ class BrokerState:
                 ORDER BY last_seen_at DESC, created_at DESC
                 LIMIT -1 OFFSET ?
                 """,
-                (router_uuid, config_type, WIRELESS_BACKUP_LIMIT),
+                (router_uuid, config_type, self._config_backup_limit),
             ).fetchall()
             for row in stale_rows:
                 conn.execute(
                     "DELETE FROM router_config_backup WHERE router_uuid=? AND config_type=? AND content_hash=?",
                     (router_uuid, config_type, row["content_hash"]),
                 )
-        if config_type == "wifi":
-            self.store_wireless_config(router_uuid, content, fetched_at)
         return content_hash
-
-    def wireless_backups(self, router_uuid):
-        return self.config_backups(router_uuid, "wifi")
 
     def config_backups(self, router_uuid, config_type):
         with self._db_context() as conn:
@@ -1268,9 +1144,6 @@ class BrokerState:
                 (router_uuid, config_type),
             ).fetchall()
         return [dict(row) for row in rows]
-
-    def backup_content(self, router_uuid, content_hash):
-        return self.config_backup_content(router_uuid, "wifi", content_hash)
 
     def config_backup_content(self, router_uuid, config_type, content_hash):
         with self._db_context() as conn:
@@ -1295,11 +1168,9 @@ class BrokerState:
             ).fetchone()
         return None if row is None else dict(row)
 
-    def fetch_wireless_config(self, router, settings):
-        return self.fetch_router_config(router, settings, "wifi")
-
     def fetch_router_config(self, router, settings, config_type):
         address = router["address"]
+        username = router.get("ssh_username") or "root"
         private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
         spec = self.config_spec(config_type)
         if not address:
@@ -1309,7 +1180,7 @@ class BrokerState:
         if spec is None:
             return {"ok": False, "message": "Unsupported config type."}
 
-        result = self.run_ssh(address, private_key, ["cat", spec["path"]], strip_output=False)
+        result = self.run_ssh(address, private_key, ["cat", spec["path"]], strip_output=False, username=username)
         if result["timed_out"]:
             return {"ok": False, "message": "Connection timed out"}
         if not result["ok"]:
@@ -1326,9 +1197,6 @@ class BrokerState:
             "fetched_at": fetched_at,
         }
 
-    def verify_wireless_is_up(self, router, settings):
-        return self.verify_router_config(router, settings, "wifi")
-
     def verify_router_config(self, router, settings, config_type, expected_content=None):
         if config_type == "wifi":
             return self.verify_wireless_status(router, settings)
@@ -1338,12 +1206,13 @@ class BrokerState:
 
     def verify_wireless_status(self, router, settings):
         address = router["address"]
+        username = router.get("ssh_username") or "root"
         private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
         if not address or not private_key:
             return {"ok": False, "message": "Router not reachable for verification."}
 
         time.sleep(2)
-        result = self.run_ssh(address, private_key, ["ubus", "call", "network.wireless", "status"])
+        result = self.run_ssh(address, private_key, ["ubus", "call", "network.wireless", "status"], username=username)
         if result["timed_out"]:
             return {"ok": False, "message": "Timed out waiting for Wi-Fi status."}
         if not result["ok"]:
@@ -1373,13 +1242,14 @@ class BrokerState:
 
     def verify_system_config(self, router, settings, expected_content):
         address = router["address"]
+        username = router.get("ssh_username") or "root"
         private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
         if not address:
             return {"ok": False, "message": "Missing router address."}
         if not private_key:
             return {"ok": False, "message": "No usable SSH private key available."}
 
-        result = self.run_ssh(address, private_key, ["cat", SYSTEM_CONFIG_PATH], strip_output=False)
+        result = self.run_ssh(address, private_key, ["cat", SYSTEM_CONFIG_PATH], strip_output=False, username=username)
         if result["timed_out"]:
             return {"ok": False, "message": "Timed out reading system config."}
         if not result["ok"]:
@@ -1389,11 +1259,9 @@ class BrokerState:
             return {"ok": False, "message": "System config did not match the applied content."}
         return {"ok": True, "message": "ok"}
 
-    def apply_wireless_config(self, router, settings, content):
-        return self.apply_router_config(router, settings, "wifi", content)
-
     def apply_router_config(self, router, settings, config_type, content, current_target_content=None, preserve_target_hostname=False):
         address = router["address"]
+        username = router.get("ssh_username") or "root"
         private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
         spec = self.config_spec(config_type)
         if not address:
@@ -1411,6 +1279,7 @@ class BrokerState:
             private_key,
             ["sh", "-c", f"cat > {spec['path']}"],
             input_text=content,
+            username=username,
         )
         if write_result["timed_out"]:
             return {"ok": False, "message": "Connection timed out"}
@@ -1419,7 +1288,7 @@ class BrokerState:
             return {"ok": False, "message": classify_ssh_error(error_text)}
 
         for command in spec["apply_commands"]:
-            reload_result = self.run_ssh(address, private_key, command)
+            reload_result = self.run_ssh(address, private_key, command, username=username)
             if reload_result["timed_out"]:
                 return {"ok": False, "message": f"Timed out during {config_type} reload."}
             if not reload_result["ok"]:
@@ -1458,9 +1327,6 @@ class BrokerState:
             "results": sorted(results, key=lambda item: item.get("address", "")),
         }
 
-    def fetch_all_wireless_configs(self):
-        return self.fetch_all_configs("wifi")
-
     def fetch_all_configs(self, config_type):
         settings, routers = self.router_map()
         futures = {
@@ -1472,9 +1338,6 @@ class BrokerState:
             router = futures[future]
             results[router["router_uuid"]] = future.result()
         return settings, routers, results
-
-    def sync_wifi_configs(self, router_uuids):
-        return self.sync_configs_by_type(router_uuids, "wifi")
 
     def sync_configs_by_type(self, router_uuids, config_type):
         settings, routers, fetched = self.fetch_all_configs(config_type)
@@ -1546,9 +1409,6 @@ class BrokerState:
             "changed": sum(1 for item in results if item.get("changed")),
             "results": sorted(results, key=lambda item: item.get("address", "")),
         }
-
-    def restore_wifi_backup(self, router_uuid, content_hash):
-        return self.restore_config_backup(router_uuid, "wifi", content_hash)
 
     def restore_config_backup(self, router_uuid, config_type, content_hash):
         settings, routers = self.router_map()
@@ -1624,7 +1484,7 @@ class BrokerState:
 
     def scheduler(self):
         self.trigger_poll()
-        while not self.shutdown_event.wait(POLL_INTERVAL_SECONDS):
+        while not self.shutdown_event.wait(self._poll_interval):
             self.trigger_poll()
 
     def close(self):
@@ -1652,8 +1512,8 @@ class BrokerState:
                        router_status.uptime_seconds, router_status.memory_used_pct, router_status.wifi_clients, router_status.wifi_clients_by_radio, router_status.wifi_clients_by_network, router_status.best_signal_dbm,
                        router_status.worst_signal_dbm, router_status.signal_histogram, router_status.rx_bps, router_status.tx_bps, router_status.latency_ms,
                        router_status.last_seen, router_status.last_error, router_status.updated_at,
-                       wifi_state.content_hash AS wireless_content_hash,
-                       wifi_state.fetched_at AS wireless_fetched_at,
+                       wifi_state.content_hash AS wifi_content_hash,
+                       wifi_state.fetched_at AS wifi_fetched_at,
                        system_state.content_hash AS system_content_hash,
                        system_state.fetched_at AS system_fetched_at,
                        firewall_state.content_hash AS firewall_content_hash,
@@ -1718,6 +1578,19 @@ class BrokerHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
 
+    def _read_json_body(self):
+        """Read and parse the JSON request body. Sends a 400 and returns None on error."""
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+        try:
+            return json.loads(raw_body.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send(400, {"status": "error", "message": "Invalid JSON payload"})
+            return None
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
@@ -1742,9 +1615,6 @@ class BrokerHandler(BaseHTTPRequestHandler):
                     "backups": STATE.config_backups(router_uuid, config_type),
                 },
             )
-        elif parsed.path == "/v1/wifi-backups":
-            router_uuid = (query.get("router_uuid") or [""])[0]
-            self._send(200, {"status": "ok", "router_uuid": router_uuid, "backups": STATE.wireless_backups(router_uuid)})
         else:
             self._send(404, {"status": "error", "message": "Not found"})
 
@@ -1753,87 +1623,28 @@ class BrokerHandler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/poll-now":
             accepted = STATE.trigger_poll()
             self._send(200, {"status": "ok", "accepted": accepted})
-        elif parsed.path == "/v1/router-actions":
-            try:
-                content_length = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
-                content_length = 0
-            raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            return
 
-            try:
-                payload = json.loads(raw_body.decode("utf-8") or "{}")
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                self._send(400, {"status": "error", "message": "Invalid JSON payload"})
-                return
+        payload = self._read_json_body()
+        if payload is None:
+            return
 
+        if parsed.path == "/v1/router-actions":
             action = str(payload.get("action") or "").strip()
             routers = payload.get("routers") or []
             if not isinstance(routers, list):
                 self._send(400, {"status": "error", "message": "Routers must be a list"})
                 return
-
             result = STATE.run_router_action(action, [str(item) for item in routers if str(item).strip()])
             self._send(200 if result.get("status") == "ok" else 400, result)
-        elif parsed.path == "/v1/wifi-sync":
-            try:
-                content_length = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
-                content_length = 0
-            raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
-            try:
-                payload = json.loads(raw_body.decode("utf-8") or "{}")
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                self._send(400, {"status": "error", "message": "Invalid JSON payload"})
-                return
-            routers = payload.get("routers") or []
-            if not isinstance(routers, list):
-                self._send(400, {"status": "error", "message": "Routers must be a list"})
-                return
-            result = STATE.sync_wifi_configs([str(item) for item in routers if str(item).strip()])
-            self._send(200 if result.get("status") == "ok" else 400, result)
         elif parsed.path == "/v1/config-sync":
-            try:
-                content_length = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
-                content_length = 0
-            raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
-            try:
-                payload = json.loads(raw_body.decode("utf-8") or "{}")
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                self._send(400, {"status": "error", "message": "Invalid JSON payload"})
-                return
             routers = payload.get("routers") or []
             if not isinstance(routers, list):
                 self._send(400, {"status": "error", "message": "Routers must be a list"})
                 return
             result = STATE.sync_all_configs([str(item) for item in routers if str(item).strip()])
             self._send(200 if result.get("status") == "ok" else 400, result)
-        elif parsed.path == "/v1/wifi-restore":
-            try:
-                content_length = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
-                content_length = 0
-            raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
-            try:
-                payload = json.loads(raw_body.decode("utf-8") or "{}")
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                self._send(400, {"status": "error", "message": "Invalid JSON payload"})
-                return
-            router_uuid = str(payload.get("router_uuid") or "").strip()
-            content_hash = str(payload.get("content_hash") or "").strip()
-            result = STATE.restore_wifi_backup(router_uuid, content_hash)
-            self._send(200 if result.get("status") == "ok" else 400, result)
         elif parsed.path == "/v1/config-restore":
-            try:
-                content_length = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
-                content_length = 0
-            raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
-            try:
-                payload = json.loads(raw_body.decode("utf-8") or "{}")
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                self._send(400, {"status": "error", "message": "Invalid JSON payload"})
-                return
             router_uuid = str(payload.get("router_uuid") or "").strip()
             config_type = str(payload.get("config_type") or "").strip()
             content_hash = str(payload.get("content_hash") or "").strip()

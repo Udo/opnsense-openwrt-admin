@@ -167,18 +167,4 @@ class BrokerClient
         ], self::SYNC_TIMEOUT);
     }
 
-    public function syncWifi(array $routers): array
-    {
-        return $this->syncConfigs($routers);
-    }
-
-    public function wifiBackups(string $routerUuid): array
-    {
-        return $this->configBackups($routerUuid, 'wifi');
-    }
-
-    public function restoreWifiBackup(string $routerUuid, string $contentHash): array
-    {
-        return $this->restoreConfigBackup($routerUuid, 'wifi', $contentHash);
-    }
 }

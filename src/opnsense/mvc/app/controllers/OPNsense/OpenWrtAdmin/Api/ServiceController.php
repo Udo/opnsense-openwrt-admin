@@ -278,8 +278,14 @@ class ServiceController extends ApiControllerBase
         ];
     }
 
+    private const ALLOWED_BULK_ACTIONS = ['reboot', 'radios_on', 'radios_off', 'sync_configs'];
+
     public function bulkActionAction()
     {
+        if (!$this->request->isPost()) {
+            return ['status' => 'error', 'message' => 'POST required.'];
+        }
+
         $action = trim((string)$this->request->getPost('action'));
         $routers = $this->request->getPost('routers');
         if (!is_array($routers)) {
@@ -290,9 +296,13 @@ class ServiceController extends ApiControllerBase
             return ['status' => 'error', 'message' => 'No action selected.'];
         }
 
+        if (!in_array($action, self::ALLOWED_BULK_ACTIONS, true)) {
+            return ['status' => 'error', 'message' => 'Unknown action.'];
+        }
+
         $routerIds = array_values(array_filter(array_map('strval', $routers)));
         $client = new BrokerClient();
-        if ($action === 'sync_configs' || $action === 'sync_wifi') {
+        if ($action === 'sync_configs') {
             $result = $client->syncConfigs($routerIds);
         } else {
             $result = $client->routerActions($action, $routerIds);
@@ -338,26 +348,4 @@ class ServiceController extends ApiControllerBase
         return $this->brokerFailure($result, 'Broker request failed.');
     }
 
-    public function wifiBackupsAction()
-    {
-        $routerUuid = trim((string)$this->request->get('router_uuid'));
-        if ($routerUuid === '') {
-            return ['status' => 'error', 'message' => 'No router selected.', 'backups' => []];
-        }
-
-        return (new BrokerClient())->configBackups($routerUuid, 'wifi')['body']
-            ?? ['status' => 'error', 'message' => 'Broker request failed.', 'backups' => []];
-    }
-
-    public function restoreWifiBackupAction()
-    {
-        $routerUuid = trim((string)$this->request->getPost('router_uuid'));
-        $contentHash = trim((string)$this->request->getPost('content_hash'));
-        if ($routerUuid === '' || $contentHash === '') {
-            return ['status' => 'error', 'message' => 'Router and backup are required.'];
-        }
-
-        return (new BrokerClient())->restoreConfigBackup($routerUuid, 'wifi', $contentHash)['body']
-            ?? ['status' => 'error', 'message' => 'Broker request failed.'];
-    }
 }

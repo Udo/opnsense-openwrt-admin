@@ -1,8 +1,10 @@
+{{ partial("OPNsense/OpenWrtAdmin/_js_utils") }}
+
 <script>
     $(document).ready(function() {
-        const tbody = $("#openwrtAdminDashboardRows");
-        const statusLine = $("#openwrtAdminDashboardStatus");
-        const brokerBanner = $("#openwrtAdminDashboardBrokerBanner");
+        var tbody = $("#openwrtAdminDashboardRows");
+        var statusLine = $("#openwrtAdminDashboardStatus");
+        var brokerBanner = "#openwrtAdminDashboardBrokerBanner";
 
         function formatLoad(value) {
             return value === null || value === undefined ? "n/a" : Number(value).toFixed(2);
@@ -10,22 +12,6 @@
 
         function formatPercent(value) {
             return value === null || value === undefined ? "n/a" : value + "%";
-        }
-
-        function formatRate(value) {
-            if (value === null || value === undefined || value === "") {
-                return "n/a";
-            }
-
-            const units = ["B/s", "KB/s", "MB/s", "GB/s"];
-            let amount = Number(value);
-            let unit = 0;
-            while (amount >= 1024 && unit < units.length - 1) {
-                amount /= 1024;
-                unit += 1;
-            }
-            const decimals = amount >= 100 || unit === 0 ? 0 : 1;
-            return amount.toFixed(decimals) + " " + units[unit];
         }
 
         function renderWifiClients(router) {
@@ -43,7 +29,7 @@
                 return $("<span>").text(router.wifi_clients);
             }
 
-            let byNetwork = router.wifi_clients_by_network;
+            var byNetwork = router.wifi_clients_by_network;
             if (typeof byNetwork === "string") {
                 try {
                     byNetwork = JSON.parse(byNetwork);
@@ -56,12 +42,12 @@
                 return renderPlaceholder();
             }
 
-            const networks = Object.keys(byNetwork).sort();
+            var networks = Object.keys(byNetwork).sort();
             if (!networks.length) {
                 return renderPlaceholder();
             }
 
-            const wrapper = $("<div>");
+            var wrapper = $("<div>");
             networks.forEach(function(network) {
                 wrapper.append(
                     $("<div>", {
@@ -81,12 +67,12 @@
 
         function renderSignal(router) {
             function renderSignalPlaceholder() {
-                const wrapper = $("<div>");
-                const label = $("<div>", {
+                var wrapper = $("<div>");
+                var label = $("<div>", {
                     class: "small text-muted",
                     text: "---"
                 });
-                const bar = $("<div>").css({
+                var bar = $("<div>").css({
                     display: "flex",
                     width: "140px",
                     height: "10px",
@@ -104,7 +90,7 @@
                 return renderSignalPlaceholder();
             }
 
-            let histogram = router.signal_histogram;
+            var histogram = router.signal_histogram;
             if (typeof histogram === "string") {
                 try {
                     histogram = JSON.parse(histogram);
@@ -117,7 +103,7 @@
                 return renderSignalPlaceholder();
             }
 
-            const total = ["excellent", "good", "fair", "weak"].reduce(function(sum, key) {
+            var total = ["excellent", "good", "fair", "weak"].reduce(function(sum, key) {
                 return sum + (histogram[key] || 0);
             }, 0);
 
@@ -125,12 +111,12 @@
                 return renderSignalPlaceholder();
             }
 
-            const wrapper = $("<div>");
-            const label = $("<div>", {
+            var wrapper = $("<div>");
+            var label = $("<div>", {
                 class: "small text-muted",
                 text: "best " + router.best_signal_dbm + " / worst " + router.worst_signal_dbm + " dBm"
             });
-            const bar = $("<div>").css({
+            var bar = $("<div>").css({
                 display: "flex",
                 width: "140px",
                 height: "10px",
@@ -146,7 +132,7 @@
                 {key: "fair", color: "#f59e0b"},
                 {key: "weak", color: "#ef4444"}
             ].forEach(function(bucket) {
-                const count = histogram[bucket.key] || 0;
+                var count = histogram[bucket.key] || 0;
                 if (!count) {
                     return;
                 }
@@ -159,28 +145,6 @@
 
             wrapper.append(label).append(bar);
             return wrapper;
-        }
-
-        function formatUptime(seconds) {
-            if (seconds === null || seconds === undefined) {
-                return "n/a";
-            }
-
-            const total = Math.max(0, parseInt(seconds, 10) || 0);
-            const days = Math.floor(total / 86400);
-            const hours = Math.floor((total % 86400) / 3600);
-            const minutes = Math.floor((total % 3600) / 60);
-            const parts = [];
-
-            if (days > 0) {
-                parts.push(days + "d");
-            }
-            if (hours > 0 || days > 0) {
-                parts.push(hours + "h");
-            }
-            parts.push(minutes + "m");
-
-            return parts.join(" ");
         }
 
         function renderRows(routers) {
@@ -200,9 +164,9 @@
             }
 
             routers.forEach(function(router) {
-                const hostname = router.detected_hostname || router.configured_hostname || "";
-                let statusText = router.status_text || "Unknown";
-                let statusClass = "label-danger";
+                var hostname = router.detected_hostname || router.configured_hostname || "";
+                var statusText = router.status_text || "Unknown";
+                var statusClass = "label-danger";
 
                 if (router.reachable) {
                     if (statusText.indexOf("Healthy") === 0) {
@@ -232,35 +196,20 @@
                             )
                         )
                         .append($("<td>").text(formatLoad(router.load_1m)))
-                        .append($("<td>").text(formatUptime(router.uptime_seconds)))
+                        .append($("<td>").text(openwrtAdminFormatUptime(router.uptime_seconds)))
                         .append($("<td>").text(formatPercent(router.memory_used_pct)))
                         .append($("<td>").append(renderWifiClients(router)))
-                        .append($("<td>").text("rx " + formatRate(router.rx_bps) + " / tx " + formatRate(router.tx_bps)))
+                        .append($("<td>").text("rx " + openwrtAdminFormatRate(router.rx_bps) + " / tx " + openwrtAdminFormatRate(router.tx_bps)))
                         .append($("<td>").append(renderSignal(router)))
                 );
             });
         }
 
-        function updateBrokerBanner() {
-            ajaxCall("/api/openwrtadmin/service/status/", {}, function(data) {
-                const broker = data.broker || null;
-                if (broker && broker.ok && broker.body) {
-                    brokerBanner.addClass("hidden").text("");
-                    return;
-                }
-
-                const serviceState = data.service || "unknown";
-                brokerBanner
-                    .removeClass("hidden")
-                    .text("PHP cannot reach the OpenWrt Admin broker on 127.0.0.1:9783. Service status: " + serviceState + ".");
-            });
-        }
-
         function refreshDashboard() {
-            updateBrokerBanner();
+            openwrtAdminUpdateBrokerBanner(brokerBanner);
             ajaxCall("/api/openwrtadmin/service/routers/", {}, function(data) {
                 renderRows(Array.isArray(data.routers) ? data.routers : []);
-                statusLine.text("Updated " + new Date().toLocaleTimeString());
+                statusLine.text("{{ lang._('Updated') }} " + new Date().toLocaleTimeString());
             });
         }
 

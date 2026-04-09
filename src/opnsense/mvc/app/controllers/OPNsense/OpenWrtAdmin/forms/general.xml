@@ -3,18 +3,48 @@
         <id>settings.managed_key_comment</id>
         <label>Managed key comment</label>
         <type>text</type>
-        <help>Comment embedded into the plugin-managed SSH keypair when it is generated.</help>
+        <help>Comment embedded into the plugin-managed SSH keypair when it is generated. Used only for identification (e.g. in authorized_keys on each router).</help>
     </field>
     <field>
         <id>settings.managed_public_key</id>
         <label>Managed public key</label>
         <type>textbox</type>
-        <help>The OpenWrt Admin public key stored in this plugin's configuration.</help>
+        <help>The SSH public key generated and stored by this plugin. Copy this key into /root/.ssh/authorized_keys on each router, or use the Copy Public Key button below.</help>
     </field>
     <field>
         <id>settings.managed_private_key</id>
         <label>Managed private key</label>
         <type>textbox</type>
-        <help>The OpenWrt Admin private key stored in this plugin's configuration.</help>
+        <help>WARNING: This private key is stored in plain text in config.xml and is included in OPNsense configuration backups. Keep backups secure. The broker uses this key to authenticate with your routers over SSH.</help>
+    </field>
+    <field>
+        <id>settings.poll_interval_seconds</id>
+        <label>Poll interval (seconds)</label>
+        <type>text</type>
+        <help>How often the broker polls each router for status. Takes effect after a service restart. Default: 60.</help>
+    </field>
+    <field>
+        <id>settings.ssh_connect_timeout_seconds</id>
+        <label>SSH connect timeout (seconds)</label>
+        <type>text</type>
+        <help>Seconds to wait when establishing a new SSH connection. Increase for routers on slow or high-latency links. Takes effect after a service restart. Default: 5.</help>
+    </field>
+    <field>
+        <id>settings.ssh_command_timeout_seconds</id>
+        <label>SSH command timeout (seconds)</label>
+        <type>text</type>
+        <help>Seconds to wait for each remote SSH command to complete. Increase if routers are slow to respond. Takes effect after a service restart. Default: 15.</help>
+    </field>
+    <field>
+        <id>settings.max_parallel_polls</id>
+        <label>Max parallel polls</label>
+        <type>text</type>
+        <help>Number of routers polled concurrently. Increase for large fleets. Takes effect after a service restart. Default: 8.</help>
+    </field>
+    <field>
+        <id>settings.config_backup_limit</id>
+        <label>Config backup limit</label>
+        <type>text</type>
+        <help>Maximum number of historical backups retained per router per config type (wifi, system, firewall, dhcp, rpcd). Oldest entries are pruned automatically. Default: 8.</help>
     </field>
 </form>

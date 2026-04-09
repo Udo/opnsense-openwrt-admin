@@ -8,6 +8,31 @@
             </managed_key_comment>
             <managed_public_key type="TextField"/>
             <managed_private_key type="TextField"/>
+            <poll_interval_seconds type="IntegerField">
+                <Default>60</Default>
+                <MinimumValue>10</MinimumValue>
+                <MaximumValue>3600</MaximumValue>
+            </poll_interval_seconds>
+            <ssh_connect_timeout_seconds type="IntegerField">
+                <Default>5</Default>
+                <MinimumValue>1</MinimumValue>
+                <MaximumValue>30</MaximumValue>
+            </ssh_connect_timeout_seconds>
+            <ssh_command_timeout_seconds type="IntegerField">
+                <Default>15</Default>
+                <MinimumValue>2</MinimumValue>
+                <MaximumValue>120</MaximumValue>
+            </ssh_command_timeout_seconds>
+            <max_parallel_polls type="IntegerField">
+                <Default>8</Default>
+                <MinimumValue>1</MinimumValue>
+                <MaximumValue>64</MaximumValue>
+            </max_parallel_polls>
+            <config_backup_limit type="IntegerField">
+                <Default>8</Default>
+                <MinimumValue>1</MinimumValue>
+                <MaximumValue>50</MaximumValue>
+            </config_backup_limit>
         </settings>
         <routers>
             <router type="ArrayField">
@@ -18,6 +43,9 @@
                     <Required>Y</Required>
                 </hostname>
                 <description type="DescriptionField"/>
+                <ssh_username type="TextField">
+                    <Default>root</Default>
+                </ssh_username>
                 <ssh_key_ref type=".\SshPublicKeyField">
                     <Required>Y</Required>
                     <Default>system:/root/.ssh/id_ed25519.pub</Default>

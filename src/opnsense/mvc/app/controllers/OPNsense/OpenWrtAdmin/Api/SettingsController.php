@@ -19,7 +19,7 @@ class SettingsController extends ApiMutableModelControllerBase
     private const CONFIG_SOURCES = [
         'wifi' => [
             'field' => 'sync_wifi_config_from',
-            'hash' => 'wireless_content_hash',
+            'hash' => 'wifi_content_hash',
         ],
         'system' => [
             'field' => 'sync_system_config_from',
