@@ -626,17 +626,28 @@ class BrokerState:
         except OSError:
             pass
 
-    def run_ssh(self, address, private_key, remote_args, allow_retry=True, input_text=None, strip_output=True, username="root"):
+    def run_ssh(
+        self,
+        address,
+        private_key,
+        remote_args,
+        allow_retry=True,
+        input_text=None,
+        strip_output=True,
+        username="root",
+        timeout_seconds=None,
+    ):
         control_path = self.control_socket_path(address, private_key, username)
         command = self.ssh_base_command(address, private_key, control_path, username) + remote_args
         started = time.monotonic()
+        timeout_seconds = self._ssh_command_timeout if timeout_seconds is None else timeout_seconds
         try:
             proc = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
                 input=input_text,
-                timeout=self._ssh_command_timeout,
+                timeout=timeout_seconds,
                 check=False,
             )
         except subprocess.TimeoutExpired:
@@ -670,6 +681,7 @@ class BrokerState:
                 input_text=input_text,
                 strip_output=strip_output,
                 username=username,
+                timeout_seconds=timeout_seconds,
             )
             retry_result["latency_ms"] += latency
             return retry_result
@@ -965,10 +977,176 @@ class BrokerState:
             return ["ubus", "call", "network.wireless", "down"]
         return None
 
+    def apply_roaming_baseline(self, router, settings):
+        address = router["address"]
+        username = router.get("ssh_username") or "root"
+        private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
+
+        if not address:
+            return {
+                "router_uuid": router["router_uuid"],
+                "address": "",
+                "ok": False,
+                "message": "Missing router address.",
+            }
+
+        if not private_key:
+            return {
+                "router_uuid": router["router_uuid"],
+                "address": address,
+                "ok": False,
+                "message": "No usable SSH private key available.",
+            }
+
+        script = r"""
+set -eu
+stamp="$(date +%Y%m%d-%H%M%S)"
+cp /etc/config/wireless "/etc/config/wireless.pre-openwrt-admin-$stamp"
+[ -f /etc/config/usteer ] && cp /etc/config/usteer "/etc/config/usteer.pre-openwrt-admin-$stamp" || true
+if ! command -v usteerd >/dev/null 2>&1; then
+  apk update >/tmp/apk-update.log 2>&1
+  apk add usteer >/tmp/apk-add-usteer.log 2>&1
+fi
+if ! uci -q get usteer.@usteer[0] >/dev/null 2>&1; then
+  uci add usteer usteer >/dev/null
+fi
+uci batch <<'UCI'
+set wireless.radio0.channel='auto'
+set wireless.radio1.channel='auto'
+set wireless.wifinet0.ieee80211r='1'
+set wireless.wifinet1.ieee80211r='1'
+set wireless.wifinet0.ieee80211k='1'
+set wireless.wifinet1.ieee80211k='1'
+set wireless.wifinet0.ft_over_ds='0'
+set wireless.wifinet1.ft_over_ds='0'
+set wireless.wifinet0.bss_transition='1'
+set wireless.wifinet1.bss_transition='1'
+set wireless.wifinet0.wnm_sleep_mode='1'
+set wireless.wifinet1.wnm_sleep_mode='1'
+set wireless.wifinet0.wnm_sleep_mode_no_keys='1'
+set wireless.wifinet1.wnm_sleep_mode_no_keys='1'
+set usteer.@usteer[0].network='lan'
+set usteer.@usteer[0].syslog='1'
+set usteer.@usteer[0].local_mode='0'
+set usteer.@usteer[0].ipv6='0'
+set usteer.@usteer[0].debug_level='2'
+set usteer.@usteer[0].assoc_steering='1'
+set usteer.@usteer[0].probe_steering='1'
+set usteer.@usteer[0].load_balancing_threshold='2'
+set usteer.@usteer[0].signal_diff_threshold='8'
+set usteer.@usteer[0].band_steering_interval='120000'
+set usteer.@usteer[0].band_steering_min_snr='-60'
+set usteer.@usteer[0].roam_scan_snr='-70'
+set usteer.@usteer[0].roam_scan_tries='3'
+set usteer.@usteer[0].roam_scan_interval='10000'
+set usteer.@usteer[0].roam_trigger_snr='-75'
+set usteer.@usteer[0].roam_trigger_interval='60000'
+set usteer.@usteer[0].link_measurement_interval='30000'
+del usteer.@usteer[0].ssid_list
+add_list usteer.@usteer[0].ssid_list='KGMobile'
+commit wireless
+commit usteer
+UCI
+wifi reload
+/etc/init.d/usteer enable
+/etc/init.d/usteer restart
+sleep 2
+ubus call network.wireless status | grep -q '"up": true'
+pgrep -af usteer >/dev/null 2>&1
+"""
+
+        result = self.run_ssh(
+            address,
+            private_key,
+            ["sh", "-c", script],
+            username=username,
+            strip_output=False,
+        )
+        if result["timed_out"]:
+            return {
+                "router_uuid": router["router_uuid"],
+                "address": address,
+                "ok": False,
+                "message": "Connection timed out",
+            }
+
+        if not result["ok"]:
+            error_text = (result["stderr"] or result["stdout"] or "").strip()
+            return {
+                "router_uuid": router["router_uuid"],
+                "address": address,
+                "ok": False,
+                "message": classify_ssh_error(error_text) if error_text else "Failed to apply roaming baseline.",
+            }
+
+        return {
+            "router_uuid": router["router_uuid"],
+            "address": address,
+            "ok": True,
+            "message": "ok",
+        }
+
+    def apply_system_update(self, router, settings):
+        address = router["address"]
+        username = router.get("ssh_username") or "root"
+        private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
+
+        if not address:
+            return {
+                "router_uuid": router["router_uuid"],
+                "address": "",
+                "ok": False,
+                "message": "Missing router address.",
+            }
+
+        if not private_key:
+            return {
+                "router_uuid": router["router_uuid"],
+                "address": address,
+                "ok": False,
+                "message": "No usable SSH private key available.",
+            }
+
+        result = self.run_ssh(
+            address,
+            private_key,
+            ["sh", "-c", "apk update && apk upgrade"],
+            username=username,
+            strip_output=False,
+            timeout_seconds=600,
+        )
+        if result["timed_out"]:
+            return {
+                "router_uuid": router["router_uuid"],
+                "address": address,
+                "ok": False,
+                "message": "System update timed out",
+            }
+
+        if not result["ok"]:
+            error_text = (result["stderr"] or result["stdout"] or "").strip()
+            return {
+                "router_uuid": router["router_uuid"],
+                "address": address,
+                "ok": False,
+                "message": error_text if error_text else "System update failed.",
+            }
+
+        return {
+            "router_uuid": router["router_uuid"],
+            "address": address,
+            "ok": True,
+            "message": "ok",
+        }
+
     def perform_router_action(self, router, settings, action):
         address = router["address"]
         username = router.get("ssh_username") or "root"
         private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
+        if action == "apply_roaming_baseline":
+            return self.apply_roaming_baseline(router, settings)
+        if action == "sys_update":
+            return self.apply_system_update(router, settings)
         command = self.router_action_command(action)
 
         if not address:

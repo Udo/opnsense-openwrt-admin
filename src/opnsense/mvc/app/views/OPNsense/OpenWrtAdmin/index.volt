@@ -19,7 +19,7 @@
         var routerSyncStatusFieldId = "router\\.sync_status";
         var brokerBannerId = "#openwrtAdminBrokerBanner";
         var bulkActionStatusId = "#openwrtAdminBulkActionStatus";
-        var bulkActionButtonIds = "#bulkRebootRoutersBtn, #bulkRadiosOnBtn, #bulkRadiosOffBtn, #bulkSyncRoutersBtn";
+        var bulkActionButtonIds = "#bulkSyncRoutersBtn, #bulkSysUpdateBtn, #bulkRebootRoutersBtn, #bulkRadiosOnBtn, #bulkRadiosOffBtn, #bulkRoamingBaselineBtn";
         var currentEditRouterUuid = null;
         var runtimeRouters = [];
 
@@ -298,6 +298,10 @@
                         setBulkActionStatus((data.successful || 0) + " {{ lang._('ok') }}, " + failed.length + " {{ lang._('failed.') }} " + details, "error");
                     } else if (action === "sync_configs") {
                         setBulkActionStatus((data.changed || 0) + " {{ lang._('router(s) synced.') }}", "success");
+                    } else if (action === "sys_update") {
+                        setBulkActionStatus((data.successful || 0) + " {{ lang._('router(s) updated with system packages.') }}", "success");
+                    } else if (action === "apply_roaming_baseline") {
+                        setBulkActionStatus((data.successful || 0) + " {{ lang._('router(s) updated with the roaming baseline.') }}", "success");
                     } else {
                         setBulkActionStatus((data.successful || 0) + " {{ lang._('router(s) updated.') }}", "success");
                     }
@@ -457,8 +461,16 @@
             performBulkAction("radios_off", "{{ lang._('Disable radios') }}", "{{ lang._('Disable Wi-Fi radios on the selected routers?') }}");
         });
 
+        $(document).on("click", "#bulkRoamingBaselineBtn", function() {
+            performBulkAction("apply_roaming_baseline", "{{ lang._('Apply roaming baseline') }}", "{{ lang._('Install usteer and apply the roaming baseline on the selected routers?') }}");
+        });
+
         $(document).on("click", "#bulkSyncRoutersBtn", function() {
             performBulkAction("sync_configs", "{{ lang._('Sync configs') }}", "{{ lang._('Sync configs on the selected routers where needed?') }}");
+        });
+
+        $(document).on("click", "#bulkSysUpdateBtn", function() {
+            performBulkAction("sys_update", "{{ lang._('System update') }}", "{{ lang._('Run apk update and apk upgrade on the selected routers?') }}");
         });
 
         $(document).on("click", ".openwrtAdminRestoreBackupBtn", function() {
@@ -501,42 +513,34 @@
     <div class="alert alert-warning hidden" id="openwrtAdminBrokerBanner"></div>
     <div class="hidden" id="openwrtAdminBulkActionStatus"></div>
     {{ partial('layout_partials/base_bootgrid_table', formGridRouter + {
-        'command_width': '135',
-        'grid_commands': {
-            'bulkRebootRoutersBtn': {
-                'class': 'btn btn-xs btn-default',
-                'icon_class': 'fa fa-fw fa-refresh',
-                'title': lang._('Reboot selected routers'),
-                'data': {
-                    'toggle': 'tooltip'
-                }
-            },
-            'bulkRadiosOnBtn': {
-                'class': 'btn btn-xs btn-default',
-                'icon_class': 'fa fa-fw',
-                'title': lang._('Enable radios on selected routers'),
-                'data': {
-                    'toggle': 'tooltip'
-                }
-            },
-            'bulkRadiosOffBtn': {
-                'class': 'btn btn-xs btn-default',
-                'icon_class': 'fa fa-fw',
-                'title': lang._('Disable radios on selected routers'),
-                'data': {
-                    'toggle': 'tooltip'
-                }
-            },
-            'bulkSyncRoutersBtn': {
-                'class': 'btn btn-xs btn-default',
-                'icon_class': 'fa fa-fw fa-exchange',
-                'title': lang._('Sync selected routers from their configured config sources'),
-                'data': {
-                    'toggle': 'tooltip'
-                }
-            }
-        }
+        'command_width': '135'
     }) }}
+    <div class="panel panel-default top-padding">
+        <div class="panel-body">
+            <strong>{{ lang._('Selected routers') }}</strong>
+            <span class="text-muted">{{ lang._('Choose an action to run on the currently selected rows.') }}</span>
+            <div class="top-padding">
+                <button class="btn btn-default" id="bulkSyncRoutersBtn" type="button" disabled="disabled" title="{{ lang._('Pull current configs, compare them with configured parent routers, push parent configs where needed, and reload affected services.') }}">
+                    <span class="fa fa-random fa-fw"></span> {{ lang._('Sync Configs') }}
+                </button>
+                <button class="btn btn-default" id="bulkSysUpdateBtn" type="button" disabled="disabled" title="{{ lang._('Run apk update and apk upgrade on the selected routers.') }}">
+                    <span class="fa fa-download fa-fw"></span> {{ lang._('Sys Update') }}
+                </button>
+                <button class="btn btn-default" id="bulkRebootRoutersBtn" type="button" disabled="disabled" title="{{ lang._('Reboot the selected routers.') }}">
+                    <span class="fa fa-refresh fa-fw"></span> {{ lang._('Reboot') }}
+                </button>
+                <button class="btn btn-default" id="bulkRadiosOnBtn" type="button" disabled="disabled" title="{{ lang._('Enable Wi-Fi radios on the selected routers.') }}">
+                    {{ lang._('Radios On') }}
+                </button>
+                <button class="btn btn-default" id="bulkRadiosOffBtn" type="button" disabled="disabled" title="{{ lang._('Disable Wi-Fi radios on the selected routers.') }}">
+                    {{ lang._('Radios Off') }}
+                </button>
+                <button class="btn btn-default" id="bulkRoamingBaselineBtn" type="button" disabled="disabled" title="{{ lang._('Install usteer if needed and apply the standard roaming baseline: auto channels, 802.11r/k, BSS transition, and steering settings.') }}">
+                    <span class="fa fa-exchange fa-fw"></span> {{ lang._('Apply Roaming Baseline') }}
+                </button>
+            </div>
+        </div>
+    </div>
 </div>
 
 {{ partial("layout_partials/base_dialog", ['fields': formDialogRouter, 'id': formGridRouter['edit_dialog_id'], 'label': lang._('Edit router')]) }}

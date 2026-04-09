@@ -14,6 +14,7 @@ class BrokerClient
     private const DEFAULT_TIMEOUT = 2.0;
     private const ACTION_TIMEOUT = 15.0;
     private const SYNC_TIMEOUT = 45.0;
+    private const UPDATE_TIMEOUT = 900.0;
 
     private function request(string $method, string $path, ?array $payload = null, ?float $timeout = null): array
     {
@@ -137,10 +138,11 @@ class BrokerClient
 
     public function routerActions(string $action, array $routers): array
     {
+        $timeout = $action === 'sys_update' ? self::UPDATE_TIMEOUT : self::ACTION_TIMEOUT;
         return $this->request('POST', '/v1/router-actions', [
             'action' => $action,
             'routers' => array_values($routers),
-        ], self::ACTION_TIMEOUT);
+        ], $timeout);
     }
 
     public function syncConfigs(array $routers): array

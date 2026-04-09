@@ -278,7 +278,7 @@ class ServiceController extends ApiControllerBase
         ];
     }
 
-    private const ALLOWED_BULK_ACTIONS = ['reboot', 'radios_on', 'radios_off', 'sync_configs'];
+    private const ALLOWED_BULK_ACTIONS = ['reboot', 'radios_on', 'radios_off', 'sync_configs', 'apply_roaming_baseline', 'sys_update'];
 
     public function bulkActionAction()
     {
