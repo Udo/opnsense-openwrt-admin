@@ -12,9 +12,80 @@
             return value === null || value === undefined ? "n/a" : value + "%";
         }
 
+        function renderWifiClients(router) {
+            function renderPlaceholder() {
+                return $("<span>", {
+                    class: "text-muted",
+                    text: "n/a"
+                });
+            }
+
+            if (!router.wifi_clients_by_network) {
+                if (router.wifi_clients === null || router.wifi_clients === undefined) {
+                    return renderPlaceholder();
+                }
+                return $("<span>").text(router.wifi_clients);
+            }
+
+            let byNetwork = router.wifi_clients_by_network;
+            if (typeof byNetwork === "string") {
+                try {
+                    byNetwork = JSON.parse(byNetwork);
+                } catch (e) {
+                    byNetwork = null;
+                }
+            }
+
+            if (!byNetwork || typeof byNetwork !== "object") {
+                return renderPlaceholder();
+            }
+
+            const networks = Object.keys(byNetwork).sort();
+            if (!networks.length) {
+                return renderPlaceholder();
+            }
+
+            const wrapper = $("<div>");
+            networks.forEach(function(network) {
+                wrapper.append(
+                    $("<div>", {
+                        class: "small"
+                    }).append(
+                        $("<span>", {
+                            class: "text-muted",
+                            text: network + ": "
+                        })
+                    ).append(
+                        $("<strong>").text(byNetwork[network])
+                    )
+                );
+            });
+            return wrapper;
+        }
+
         function renderSignal(router) {
+            function renderSignalPlaceholder() {
+                const wrapper = $("<div>");
+                const label = $("<div>", {
+                    class: "small text-muted",
+                    text: "---"
+                });
+                const bar = $("<div>").css({
+                    display: "flex",
+                    width: "140px",
+                    height: "10px",
+                    borderRadius: "999px",
+                    overflow: "hidden",
+                    background: "#d1d5db",
+                    marginTop: "4px"
+                });
+
+                wrapper.append(label).append(bar);
+                return wrapper;
+            }
+
             if (!router.signal_histogram) {
-                return $("<span>", {class: "text-muted", text: "n/a"});
+                return renderSignalPlaceholder();
             }
 
             let histogram = router.signal_histogram;
@@ -27,7 +98,7 @@
             }
 
             if (!histogram) {
-                return $("<span>", {class: "text-muted", text: "n/a"});
+                return renderSignalPlaceholder();
             }
 
             const total = ["excellent", "good", "fair", "weak"].reduce(function(sum, key) {
@@ -35,7 +106,7 @@
             }, 0);
 
             if (!total) {
-                return $("<span>", {class: "text-muted", text: "n/a"});
+                return renderSignalPlaceholder();
             }
 
             const wrapper = $("<div>");
@@ -147,7 +218,7 @@
                         .append($("<td>").text(formatLoad(router.load_1m)))
                         .append($("<td>").text(formatUptime(router.uptime_seconds)))
                         .append($("<td>").text(formatPercent(router.memory_used_pct)))
-                        .append($("<td>").text(router.wifi_clients === null || router.wifi_clients === undefined ? "n/a" : router.wifi_clients))
+                        .append($("<td>").append(renderWifiClients(router)))
                         .append($("<td>").append(renderSignal(router)))
                 );
             });
@@ -200,7 +271,7 @@
                                 <th>{{ lang._('Load') }}</th>
                                 <th>{{ lang._('Uptime') }}</th>
                                 <th>{{ lang._('Memory Used') }}</th>
-                                <th>{{ lang._('WiFi Clients') }}</th>
+                                <th>{{ lang._('WiFi Clients / Network') }}</th>
                                 <th>{{ lang._('Signal') }}</th>
                             </tr>
                         </thead>

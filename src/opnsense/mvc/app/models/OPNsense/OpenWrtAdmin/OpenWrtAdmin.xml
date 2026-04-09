@@ -22,12 +22,19 @@
                     <Required>Y</Required>
                     <Default>system:/root/.ssh/id_ed25519.pub</Default>
                 </ssh_key_ref>
+                <sync_wifi_config_from type=".\RouterReferenceField"/>
+                <sync_system_config_from type=".\RouterReferenceField"/>
+                <sync_firewall_config_from type=".\RouterReferenceField"/>
+                <sync_dhcp_config_from type=".\RouterReferenceField"/>
+                <sync_rpcd_config_from type=".\RouterReferenceField"/>
+                <sync_status type="TextField"/>
                 <status type="TextField">
                     <Default>Unknown</Default>
                 </status>
                 <version type="TextField">
                     <Default>N/A</Default>
                 </version>
+                <hardware type="TextField"/>
             </router>
         </routers>
     </items>

@@ -1,5 +1,6 @@
 #!/usr/local/bin/python3
 
+import hashlib
 import json
 import os
 import signal
@@ -7,8 +8,10 @@ import sqlite3
 import subprocess
 import threading
 import time
+import urllib.parse
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,15 +22,24 @@ BROKER_PORT = 9783
 DATA_DIR = Path("/var/db/openwrt-admin")
 DB_PATH = DATA_DIR / "state.sqlite"
 KEY_DIR = DATA_DIR / "keys"
+CONTROL_SOCKET_DIR = DATA_DIR / "control"
 KNOWN_HOSTS_PATH = DATA_DIR / "known_hosts"
 CONFIG_XML_PATH = Path("/conf/config.xml")
 LOG_PREFIX = "[openwrt-admind]"
 POLL_INTERVAL_SECONDS = 60
 SSH_CONNECT_TIMEOUT_SECONDS = 1
 SSH_COMMAND_TIMEOUT_SECONDS = 4
+SSH_CONTROL_PERSIST_SECONDS = 120
 MAX_PARALLEL_POLLS = 8
 MANAGED_KEY_REF = "managed:openwrt-admin"
 MANAGED_KEY_PATH = KEY_DIR / "managed_ed25519"
+WIRELESS_CONFIG_PATH = "/etc/config/wireless"
+SYSTEM_CONFIG_PATH = "/etc/config/system"
+FIREWALL_CONFIG_PATH = "/etc/config/firewall"
+DHCP_CONFIG_PATH = "/etc/config/dhcp"
+RPCD_CONFIG_PATH = "/etc/config/rpcd"
+WIRELESS_BACKUP_LIMIT = 8
+CONFIG_TYPES = ("wifi", "system", "firewall", "dhcp", "rpcd")
 
 
 def now_iso():
@@ -88,6 +100,22 @@ def compact_json(data):
     return json.dumps(data, separators=(",", ":"))
 
 
+def normalize_mac(value):
+    if not isinstance(value, str):
+        return ""
+    cleaned = value.strip().lower().replace("-", ":")
+    return cleaned
+
+
+def integer_or_none(value):
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class BrokerState:
     def __init__(self):
         self.lock = threading.Lock()
@@ -103,6 +131,8 @@ class BrokerState:
     def _ensure_paths(self):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         KEY_DIR.mkdir(parents=True, exist_ok=True)
+        CONTROL_SOCKET_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(CONTROL_SOCKET_DIR, 0o700)
         KNOWN_HOSTS_PATH.touch(mode=0o600, exist_ok=True)
         os.chmod(KNOWN_HOSTS_PATH, 0o600)
 
@@ -111,8 +141,17 @@ class BrokerState:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @contextmanager
+    def _db_context(self):
+        conn = self._db()
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
     def _init_db(self):
-        with self._db() as conn:
+        with self._db_context() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS router_status (
@@ -124,11 +163,14 @@ class BrokerState:
                     reachable INTEGER NOT NULL DEFAULT 0,
                     status_text TEXT,
                     version TEXT,
+                    hardware_model TEXT,
                     detected_hostname TEXT,
                     load_1m REAL,
                     uptime_seconds INTEGER,
                     memory_used_pct INTEGER,
                     wifi_clients INTEGER,
+                    wifi_clients_by_radio TEXT,
+                    wifi_clients_by_network TEXT,
                     best_signal_dbm INTEGER,
                     worst_signal_dbm INTEGER,
                     signal_histogram TEXT,
@@ -143,9 +185,77 @@ class BrokerState:
             self._ensure_column(conn, "router_status", "uptime_seconds", "INTEGER")
             self._ensure_column(conn, "router_status", "memory_used_pct", "INTEGER")
             self._ensure_column(conn, "router_status", "wifi_clients", "INTEGER")
+            self._ensure_column(conn, "router_status", "wifi_clients_by_radio", "TEXT")
+            self._ensure_column(conn, "router_status", "wifi_clients_by_network", "TEXT")
+            self._ensure_column(conn, "router_status", "hardware_model", "TEXT")
             self._ensure_column(conn, "router_status", "best_signal_dbm", "INTEGER")
             self._ensure_column(conn, "router_status", "worst_signal_dbm", "INTEGER")
             self._ensure_column(conn, "router_status", "signal_histogram", "TEXT")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS router_wireless_state (
+                    router_uuid TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS router_wireless_backup (
+                    router_uuid TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    PRIMARY KEY (router_uuid, content_hash)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS router_config_state (
+                    router_uuid TEXT NOT NULL,
+                    config_type TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    PRIMARY KEY (router_uuid, config_type)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS router_config_backup (
+                    router_uuid TEXT NOT NULL,
+                    config_type TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    PRIMARY KEY (router_uuid, config_type, content_hash)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS router_client_status (
+                    router_uuid TEXT NOT NULL,
+                    client_mac TEXT NOT NULL,
+                    ip_address TEXT,
+                    network_name TEXT,
+                    radio_name TEXT,
+                    signal_dbm INTEGER,
+                    rx_bytes INTEGER,
+                    tx_bytes INTEGER,
+                    connected_seconds INTEGER,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (router_uuid, client_mac, network_name, radio_name)
+                )
+                """
+            )
+            self._ensure_column(conn, "router_client_status", "ip_address", "TEXT")
 
     def _ensure_column(self, conn, table_name, column_name, definition):
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
@@ -184,6 +294,11 @@ class BrokerState:
                         "hostname": (router.findtext("hostname") or "").strip(),
                         "description": (router.findtext("description") or "").strip(),
                         "ssh_key_ref": (router.findtext("ssh_key_ref") or "").strip(),
+                        "sync_wifi_config_from": (router.findtext("sync_wifi_config_from") or "").strip(),
+                        "sync_system_config_from": (router.findtext("sync_system_config_from") or "").strip(),
+                        "sync_firewall_config_from": (router.findtext("sync_firewall_config_from") or "").strip(),
+                        "sync_dhcp_config_from": (router.findtext("sync_dhcp_config_from") or "").strip(),
+                        "sync_rpcd_config_from": (router.findtext("sync_rpcd_config_from") or "").strip(),
                     }
                 )
 
@@ -209,17 +324,17 @@ class BrokerState:
 
     def sync_router_rows(self, routers):
         keep = {router["router_uuid"] for router in routers}
-        with self._db() as conn:
+        with self._db_context() as conn:
             for router in routers:
                 conn.execute(
                     """
                     INSERT INTO router_status (
                         router_uuid, address, configured_hostname, description, ssh_key_ref,
-                        reachable, status_text, version, detected_hostname, load_1m,
-                        uptime_seconds, memory_used_pct, wifi_clients, best_signal_dbm,
+                        reachable, status_text, version, hardware_model, detected_hostname, load_1m,
+                        uptime_seconds, memory_used_pct, wifi_clients, wifi_clients_by_radio, wifi_clients_by_network, best_signal_dbm,
                         worst_signal_dbm, signal_histogram, latency_ms,
                         last_seen, last_error, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 0, 'Pending', '', '', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)
+                    ) VALUES (?, ?, ?, ?, ?, 0, 'Pending', '', '', '', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)
                     ON CONFLICT(router_uuid) DO UPDATE SET
                         address=excluded.address,
                         configured_hostname=excluded.configured_hostname,
@@ -304,11 +419,27 @@ class BrokerState:
 
     def parse_wifi_clients(self, hostapd_outputs):
         total_clients = 0
-        for payload in hostapd_outputs:
+        by_radio = {}
+        by_network = {}
+        for entry in hostapd_outputs:
+            radio = entry.get("radio") or "unknown"
+            network = entry.get("network") or radio
+            payload = entry.get("payload") or {}
             clients = payload.get("clients") or {}
             if isinstance(clients, dict):
-                total_clients += len(clients)
-        return total_clients
+                count = len(clients)
+                total_clients += count
+                by_radio[radio] = by_radio.get(radio, 0) + count
+                by_network[network] = by_network.get(network, 0) + count
+        if not by_radio:
+            by_radio = None
+        if not by_network:
+            by_network = None
+        return {
+            "total": total_clients,
+            "by_radio": None if by_radio is None else compact_json(by_radio),
+            "by_network": None if by_network is None else compact_json(by_network),
+        }
 
     def parse_signal_stats(self, hostapd_outputs):
         signals = []
@@ -319,7 +450,8 @@ class BrokerState:
             "weak": 0,
         }
 
-        for payload in hostapd_outputs:
+        for entry in hostapd_outputs:
+            payload = entry.get("payload") or {}
             clients = payload.get("clients") or {}
             if not isinstance(clients, dict):
                 continue
@@ -353,7 +485,47 @@ class BrokerState:
             "signal_histogram": compact_json(histogram),
         }
 
-    def ssh_base_command(self, address, private_key):
+    def parse_client_associations(self, hostapd_outputs):
+        associations = []
+        for entry in hostapd_outputs:
+            radio = entry.get("radio") or "unknown"
+            network = entry.get("network") or radio
+            payload = entry.get("payload") or {}
+            clients = payload.get("clients") or {}
+            if not isinstance(clients, dict):
+                continue
+
+            for client_mac, client in clients.items():
+                if not isinstance(client, dict):
+                    continue
+                byte_counters = client.get("bytes") if isinstance(client.get("bytes"), dict) else {}
+
+                associations.append(
+                    {
+                        "client_mac": normalize_mac(client_mac),
+                        "ip_address": str(client.get("ipaddr") or "").strip() or None,
+                        "network_name": str(network),
+                        "radio_name": str(radio),
+                        "signal_dbm": integer_or_none(client.get("signal")),
+                        "rx_bytes": integer_or_none(client.get("rx_bytes"))
+                        if integer_or_none(client.get("rx_bytes")) is not None
+                        else integer_or_none(byte_counters.get("rx")),
+                        "tx_bytes": integer_or_none(client.get("tx_bytes"))
+                        if integer_or_none(client.get("tx_bytes")) is not None
+                        else integer_or_none(byte_counters.get("tx")),
+                        "connected_seconds": integer_or_none(
+                            client.get("connected_time") or client.get("connected_seconds")
+                        ),
+                    }
+                )
+
+        return [item for item in associations if item["client_mac"]]
+
+    def control_socket_path(self, address, private_key):
+        digest = hashlib.sha1(f"{address}|{private_key}".encode("utf-8")).hexdigest()[:20]
+        return CONTROL_SOCKET_DIR / f"cm-{digest}"
+
+    def ssh_base_command(self, address, private_key, control_path):
         return [
             "ssh",
             "-i",
@@ -380,17 +552,49 @@ class BrokerState:
             f"UserKnownHostsFile={KNOWN_HOSTS_PATH}",
             "-o",
             "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ControlMaster=auto",
+            "-o",
+            f"ControlPersist={SSH_CONTROL_PERSIST_SECONDS}",
+            "-o",
+            f"ControlPath={control_path}",
             f"root@{address}",
         ]
 
-    def run_ssh(self, address, private_key, remote_args):
-        command = self.ssh_base_command(address, private_key) + remote_args
+    def should_reset_control_socket(self, message, control_path):
+        if not control_path.exists():
+            return False
+
+        lowered = (message or "").lower()
+        markers = [
+            "control socket",
+            "master died",
+            "mux_client",
+            "stale session",
+            "session open refused",
+            "permission denied while connecting to multiplexed socket",
+        ]
+        return any(marker in lowered for marker in markers)
+
+    def remove_control_socket(self, control_path):
+        try:
+            if control_path.exists() or control_path.is_socket():
+                control_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+    def run_ssh(self, address, private_key, remote_args, allow_retry=True, input_text=None, strip_output=True):
+        control_path = self.control_socket_path(address, private_key)
+        command = self.ssh_base_command(address, private_key, control_path) + remote_args
         started = time.monotonic()
         try:
             proc = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
+                input=input_text,
                 timeout=SSH_COMMAND_TIMEOUT_SECONDS,
                 check=False,
             )
@@ -406,14 +610,29 @@ class BrokerState:
             }
 
         latency = int((time.monotonic() - started) * 1000)
-        return {
+        result = {
             "ok": proc.returncode == 0,
             "timed_out": False,
             "returncode": proc.returncode,
-            "stdout": (proc.stdout or "").strip(),
-            "stderr": (proc.stderr or "").strip(),
+            "stdout": (proc.stdout or "").strip() if strip_output else (proc.stdout or ""),
+            "stderr": (proc.stderr or "").strip() if strip_output else (proc.stderr or ""),
             "latency_ms": latency,
         }
+        error_text = result["stderr"] or result["stdout"]
+        if not result["ok"] and allow_retry and self.should_reset_control_socket(error_text, control_path):
+            self.remove_control_socket(control_path)
+            retry_result = self.run_ssh(
+                address,
+                private_key,
+                remote_args,
+                allow_retry=False,
+                input_text=input_text,
+                strip_output=strip_output,
+            )
+            retry_result["latency_ms"] += latency
+            return retry_result
+
+        return result
 
     def poll_router(self, router, settings):
         address = router["address"]
@@ -426,11 +645,14 @@ class BrokerState:
                 "reachable": 0,
                 "status_text": "Invalid",
                 "version": "",
+                "hardware_model": "",
                 "detected_hostname": "",
                 "load_1m": None,
                 "uptime_seconds": None,
                 "memory_used_pct": None,
                 "wifi_clients": None,
+                "wifi_clients_by_radio": None,
+                "wifi_clients_by_network": None,
                 "best_signal_dbm": None,
                 "worst_signal_dbm": None,
                 "signal_histogram": None,
@@ -446,11 +668,14 @@ class BrokerState:
                 "reachable": 0,
                 "status_text": "Key error",
                 "version": "",
+                "hardware_model": "",
                 "detected_hostname": "",
                 "load_1m": None,
                 "uptime_seconds": None,
                 "memory_used_pct": None,
                 "wifi_clients": None,
+                "wifi_clients_by_radio": None,
+                "wifi_clients_by_network": None,
                 "best_signal_dbm": None,
                 "worst_signal_dbm": None,
                 "signal_histogram": None,
@@ -467,11 +692,14 @@ class BrokerState:
                 "reachable": 0,
                 "status_text": "Connection timed out",
                 "version": "",
+                "hardware_model": "",
                 "detected_hostname": "",
                 "load_1m": None,
                 "uptime_seconds": None,
                 "memory_used_pct": None,
                 "wifi_clients": None,
+                "wifi_clients_by_radio": None,
+                "wifi_clients_by_network": None,
                 "best_signal_dbm": None,
                 "worst_signal_dbm": None,
                 "signal_histogram": None,
@@ -488,11 +716,14 @@ class BrokerState:
                 "reachable": 0,
                 "status_text": classify_ssh_error(last_error),
                 "version": "",
+                "hardware_model": "",
                 "detected_hostname": "",
                 "load_1m": None,
                 "uptime_seconds": None,
                 "memory_used_pct": None,
                 "wifi_clients": None,
+                "wifi_clients_by_radio": None,
+                "wifi_clients_by_network": None,
                 "best_signal_dbm": None,
                 "worst_signal_dbm": None,
                 "signal_histogram": None,
@@ -509,11 +740,14 @@ class BrokerState:
                 "reachable": 0,
                 "status_text": "Connection timed out",
                 "version": "",
+                "hardware_model": "",
                 "detected_hostname": "",
                 "load_1m": None,
                 "uptime_seconds": None,
                 "memory_used_pct": None,
                 "wifi_clients": None,
+                "wifi_clients_by_radio": None,
+                "wifi_clients_by_network": None,
                 "best_signal_dbm": None,
                 "worst_signal_dbm": None,
                 "signal_histogram": None,
@@ -530,11 +764,14 @@ class BrokerState:
                 "reachable": 0,
                 "status_text": classify_ssh_error(last_error),
                 "version": "",
+                "hardware_model": "",
                 "detected_hostname": "",
                 "load_1m": None,
                 "uptime_seconds": None,
                 "memory_used_pct": None,
                 "wifi_clients": None,
+                "wifi_clients_by_radio": None,
+                "wifi_clients_by_network": None,
                 "best_signal_dbm": None,
                 "worst_signal_dbm": None,
                 "signal_histogram": None,
@@ -553,11 +790,14 @@ class BrokerState:
                 "reachable": 0,
                 "status_text": "Protocol error",
                 "version": "",
+                "hardware_model": "",
                 "detected_hostname": "",
                 "load_1m": None,
                 "uptime_seconds": None,
                 "memory_used_pct": None,
                 "wifi_clients": None,
+                "wifi_clients_by_radio": None,
+                "wifi_clients_by_network": None,
                 "best_signal_dbm": None,
                 "worst_signal_dbm": None,
                 "signal_histogram": None,
@@ -568,11 +808,14 @@ class BrokerState:
             }
 
         wifi_clients = None
+        wifi_clients_by_radio = None
+        wifi_clients_by_network = None
         signal_stats = {
             "best_signal_dbm": None,
             "worst_signal_dbm": None,
             "signal_histogram": None,
         }
+        client_associations = []
         latency = board_result["latency_ms"] + system_info_result["latency_ms"]
         hostapd_list_result = self.run_ssh(address, private_key, ["ubus", "list", "hostapd.*"])
         latency += hostapd_list_result["latency_ms"]
@@ -582,16 +825,35 @@ class BrokerState:
             hostapd_outputs = []
             interfaces = [line.strip() for line in hostapd_list_result["stdout"].splitlines() if line.strip()]
             for iface in interfaces:
+                network_name = iface.split(".", 1)[1] if "." in iface else iface
+                status_result = self.run_ssh(address, private_key, ["ubus", "call", iface, "get_status"])
+                latency += status_result["latency_ms"]
+                if status_result["ok"] and not status_result["timed_out"] and status_result["stdout"]:
+                    try:
+                        status_payload = json.loads(status_result["stdout"])
+                        network_name = str(status_payload.get("ssid") or network_name)
+                    except json.JSONDecodeError:
+                        pass
                 clients_result = self.run_ssh(address, private_key, ["ubus", "call", iface, "get_clients"])
                 latency += clients_result["latency_ms"]
                 if not clients_result["ok"] or clients_result["timed_out"] or not clients_result["stdout"]:
                     continue
                 try:
-                    hostapd_outputs.append(json.loads(clients_result["stdout"]))
+                    hostapd_outputs.append(
+                        {
+                            "radio": iface.split(".", 1)[1] if "." in iface else iface,
+                            "network": network_name,
+                            "payload": json.loads(clients_result["stdout"]),
+                        }
+                    )
                 except json.JSONDecodeError:
                     continue
-            wifi_clients = self.parse_wifi_clients(hostapd_outputs)
+            wifi_stats = self.parse_wifi_clients(hostapd_outputs)
+            wifi_clients = wifi_stats["total"]
+            wifi_clients_by_radio = wifi_stats["by_radio"]
+            wifi_clients_by_network = wifi_stats["by_network"]
             signal_stats = self.parse_signal_stats(hostapd_outputs)
+            client_associations = self.parse_client_associations(hostapd_outputs)
         elif "Command failed: Not found" in (hostapd_list_result["stderr"] or hostapd_list_result["stdout"]):
             wifi_clients = None
 
@@ -602,14 +864,18 @@ class BrokerState:
             "reachable": 1,
             "status_text": health["status_text"],
             "version": str(release.get("description") or release.get("version") or ""),
+            "hardware_model": str(payload.get("model") or payload.get("system") or payload.get("board_name") or ""),
             "detected_hostname": str(payload.get("hostname") or ""),
             "load_1m": health["load_1m"],
             "uptime_seconds": health["uptime_seconds"],
             "memory_used_pct": health["memory_used_pct"],
             "wifi_clients": wifi_clients,
+            "wifi_clients_by_radio": wifi_clients_by_radio,
+            "wifi_clients_by_network": wifi_clients_by_network,
             "best_signal_dbm": signal_stats["best_signal_dbm"],
             "worst_signal_dbm": signal_stats["worst_signal_dbm"],
             "signal_histogram": signal_stats["signal_histogram"],
+            "client_associations": client_associations,
             "latency_ms": latency,
             "last_seen": now_iso(),
             "last_error": "",
@@ -618,14 +884,14 @@ class BrokerState:
 
     def write_poll_results(self, routers, results):
         router_map = {router["router_uuid"]: router for router in routers}
-        with self._db() as conn:
+        with self._db_context() as conn:
             for item in results:
                 router = router_map[item["router_uuid"]]
                 conn.execute(
                     """
                     UPDATE router_status
-                    SET reachable=?, status_text=?, version=?, detected_hostname=?, load_1m=?,
-                        uptime_seconds=?, memory_used_pct=?, wifi_clients=?, best_signal_dbm=?,
+                    SET reachable=?, status_text=?, version=?, hardware_model=?, detected_hostname=?, load_1m=?,
+                        uptime_seconds=?, memory_used_pct=?, wifi_clients=?, wifi_clients_by_radio=?, wifi_clients_by_network=?, best_signal_dbm=?,
                         worst_signal_dbm=?, signal_histogram=?, latency_ms=?,
                         last_seen=?, last_error=?, updated_at=?
                     WHERE router_uuid=?
@@ -634,11 +900,14 @@ class BrokerState:
                         item["reachable"],
                         item["status_text"],
                         item["version"],
+                        item["hardware_model"],
                         item["detected_hostname"],
                         item["load_1m"],
                         item["uptime_seconds"],
                         item["memory_used_pct"],
                         item["wifi_clients"],
+                        item["wifi_clients_by_radio"],
+                        item["wifi_clients_by_network"],
                         item["best_signal_dbm"],
                         item["worst_signal_dbm"],
                         item["signal_histogram"],
@@ -649,6 +918,28 @@ class BrokerState:
                         item["router_uuid"],
                     ),
                 )
+                conn.execute("DELETE FROM router_client_status WHERE router_uuid=?", (item["router_uuid"],))
+                for client in item.get("client_associations") or []:
+                    conn.execute(
+                        """
+                        INSERT INTO router_client_status (
+                            router_uuid, client_mac, ip_address, network_name, radio_name, signal_dbm,
+                            rx_bytes, tx_bytes, connected_seconds, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            item["router_uuid"],
+                            client["client_mac"],
+                            client.get("ip_address"),
+                            client.get("network_name"),
+                            client.get("radio_name"),
+                            client.get("signal_dbm"),
+                            client.get("rx_bytes"),
+                            client.get("tx_bytes"),
+                            client.get("connected_seconds"),
+                            item["updated_at"],
+                        ),
+                    )
 
     def poll_all(self):
         config = self.load_config()
@@ -669,6 +960,570 @@ class BrokerState:
             "routers": len(results),
             "reachable": reachable,
             "unreachable": len(results) - reachable,
+        }
+
+    def router_action_command(self, action):
+        if action == "reboot":
+            return ["sh", "-c", "(reboot >/dev/null 2>&1 &)"]
+        if action == "radios_on":
+            return ["ubus", "call", "network.wireless", "up"]
+        if action == "radios_off":
+            return ["ubus", "call", "network.wireless", "down"]
+        return None
+
+    def perform_router_action(self, router, settings, action):
+        address = router["address"]
+        private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
+        command = self.router_action_command(action)
+
+        if not address:
+            return {
+                "router_uuid": router["router_uuid"],
+                "address": "",
+                "ok": False,
+                "message": "Missing router address.",
+            }
+
+        if not private_key:
+            return {
+                "router_uuid": router["router_uuid"],
+                "address": address,
+                "ok": False,
+                "message": "No usable SSH private key available.",
+            }
+
+        if command is None:
+            return {
+                "router_uuid": router["router_uuid"],
+                "address": address,
+                "ok": False,
+                "message": "Unsupported action.",
+            }
+
+        result = self.run_ssh(address, private_key, command)
+        if result["timed_out"]:
+            return {
+                "router_uuid": router["router_uuid"],
+                "address": address,
+                "ok": False,
+                "message": "Connection timed out",
+            }
+
+        if not result["ok"]:
+            error_text = result["stderr"] or result["stdout"] or f"ssh exited with code {result['returncode']}"
+            return {
+                "router_uuid": router["router_uuid"],
+                "address": address,
+                "ok": False,
+                "message": classify_ssh_error(error_text),
+            }
+
+        return {
+            "router_uuid": router["router_uuid"],
+            "address": address,
+            "ok": True,
+            "message": "ok",
+        }
+
+    def router_map(self):
+        config = self.load_config()
+        return config["settings"], {router["router_uuid"]: router for router in config["routers"]}
+
+    def hash_content(self, content):
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    def config_field_name(self, config_type):
+        return f"sync_{config_type}_config_from"
+
+    def config_spec(self, config_type):
+        specs = {
+            "wifi": {
+                "path": WIRELESS_CONFIG_PATH,
+                "apply_commands": [["wifi", "reload"]],
+            },
+            "system": {
+                "path": SYSTEM_CONFIG_PATH,
+                "apply_commands": [["/sbin/reload_config"]],
+            },
+            "firewall": {
+                "path": FIREWALL_CONFIG_PATH,
+                "apply_commands": [["/etc/init.d/firewall", "reload"]],
+            },
+            "dhcp": {
+                "path": DHCP_CONFIG_PATH,
+                "apply_commands": [["/etc/init.d/dnsmasq", "restart"]],
+            },
+            "rpcd": {
+                "path": RPCD_CONFIG_PATH,
+                "apply_commands": [["/etc/init.d/rpcd", "restart"]],
+            },
+        }
+        return specs.get(config_type)
+
+    def merge_system_hostname(self, source_content, target_content):
+        source_lines = source_content.splitlines()
+        target_lines = target_content.splitlines()
+
+        target_hostname_line = None
+        for line in target_lines:
+            if line.strip().startswith("option hostname "):
+                target_hostname_line = line
+                break
+
+        if target_hostname_line is None:
+            return source_content
+
+        replaced = False
+        merged_lines = []
+        inserted = False
+        in_system_block = False
+        for index, line in enumerate(source_lines):
+            stripped = line.strip()
+            if stripped.startswith("config "):
+                if in_system_block and not inserted:
+                    merged_lines.append(target_hostname_line)
+                    inserted = True
+                in_system_block = stripped == "config system"
+            if in_system_block and stripped.startswith("option hostname "):
+                merged_lines.append(target_hostname_line)
+                replaced = True
+                inserted = True
+                continue
+            merged_lines.append(line)
+        if in_system_block and not inserted:
+            merged_lines.append(target_hostname_line)
+            inserted = True
+        if not replaced and not inserted:
+            return source_content
+        trailing_newline = "\n" if source_content.endswith("\n") else ""
+        return "\n".join(merged_lines) + trailing_newline
+
+    def store_wireless_config(self, router_uuid, content, fetched_at):
+        content_hash = self.hash_content(content)
+        with self._db_context() as conn:
+            conn.execute(
+                """
+                INSERT INTO router_wireless_state (router_uuid, content_hash, content, fetched_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(router_uuid) DO UPDATE SET
+                    content_hash=excluded.content_hash,
+                    content=excluded.content,
+                    fetched_at=excluded.fetched_at
+                """,
+                (router_uuid, content_hash, content, fetched_at),
+            )
+            conn.execute(
+                """
+                INSERT INTO router_wireless_backup (router_uuid, content_hash, content, created_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(router_uuid, content_hash) DO UPDATE SET
+                    last_seen_at=excluded.last_seen_at
+                """,
+                (router_uuid, content_hash, content, fetched_at, fetched_at),
+            )
+            stale_rows = conn.execute(
+                """
+                SELECT content_hash FROM router_wireless_backup
+                WHERE router_uuid=?
+                ORDER BY last_seen_at DESC, created_at DESC
+                LIMIT -1 OFFSET ?
+                """,
+                (router_uuid, WIRELESS_BACKUP_LIMIT),
+            ).fetchall()
+            for row in stale_rows:
+                conn.execute(
+                    "DELETE FROM router_wireless_backup WHERE router_uuid=? AND content_hash=?",
+                    (router_uuid, row["content_hash"]),
+                )
+        return content_hash
+
+    def store_config_snapshot(self, router_uuid, config_type, content, fetched_at):
+        content_hash = self.hash_content(content)
+        with self._db_context() as conn:
+            conn.execute(
+                """
+                INSERT INTO router_config_state (router_uuid, config_type, content_hash, content, fetched_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(router_uuid, config_type) DO UPDATE SET
+                    content_hash=excluded.content_hash,
+                    content=excluded.content,
+                    fetched_at=excluded.fetched_at
+                """,
+                (router_uuid, config_type, content_hash, content, fetched_at),
+            )
+            conn.execute(
+                """
+                INSERT INTO router_config_backup (router_uuid, config_type, content_hash, content, created_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(router_uuid, config_type, content_hash) DO UPDATE SET
+                    last_seen_at=excluded.last_seen_at
+                """,
+                (router_uuid, config_type, content_hash, content, fetched_at, fetched_at),
+            )
+            stale_rows = conn.execute(
+                """
+                SELECT content_hash FROM router_config_backup
+                WHERE router_uuid=? AND config_type=?
+                ORDER BY last_seen_at DESC, created_at DESC
+                LIMIT -1 OFFSET ?
+                """,
+                (router_uuid, config_type, WIRELESS_BACKUP_LIMIT),
+            ).fetchall()
+            for row in stale_rows:
+                conn.execute(
+                    "DELETE FROM router_config_backup WHERE router_uuid=? AND config_type=? AND content_hash=?",
+                    (router_uuid, config_type, row["content_hash"]),
+                )
+        if config_type == "wifi":
+            self.store_wireless_config(router_uuid, content, fetched_at)
+        return content_hash
+
+    def wireless_backups(self, router_uuid):
+        return self.config_backups(router_uuid, "wifi")
+
+    def config_backups(self, router_uuid, config_type):
+        with self._db_context() as conn:
+            rows = conn.execute(
+                """
+                SELECT content_hash, created_at, last_seen_at, length(content) AS size_bytes
+                FROM router_config_backup
+                WHERE router_uuid=? AND config_type=?
+                ORDER BY last_seen_at DESC, created_at DESC
+                """,
+                (router_uuid, config_type),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def backup_content(self, router_uuid, content_hash):
+        return self.config_backup_content(router_uuid, "wifi", content_hash)
+
+    def config_backup_content(self, router_uuid, config_type, content_hash):
+        with self._db_context() as conn:
+            row = conn.execute(
+                """
+                SELECT content FROM router_config_backup
+                WHERE router_uuid=? AND config_type=? AND content_hash=?
+                """,
+                (router_uuid, config_type, content_hash),
+            ).fetchone()
+        return None if row is None else row["content"]
+
+    def status_row(self, router_uuid):
+        with self._db_context() as conn:
+            row = conn.execute(
+                """
+                SELECT router_uuid, address, configured_hostname, hardware_model
+                FROM router_status
+                WHERE router_uuid=?
+                """,
+                (router_uuid,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def fetch_wireless_config(self, router, settings):
+        return self.fetch_router_config(router, settings, "wifi")
+
+    def fetch_router_config(self, router, settings, config_type):
+        address = router["address"]
+        private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
+        spec = self.config_spec(config_type)
+        if not address:
+            return {"ok": False, "message": "Missing router address."}
+        if not private_key:
+            return {"ok": False, "message": "No usable SSH private key available."}
+        if spec is None:
+            return {"ok": False, "message": "Unsupported config type."}
+
+        result = self.run_ssh(address, private_key, ["cat", spec["path"]], strip_output=False)
+        if result["timed_out"]:
+            return {"ok": False, "message": "Connection timed out"}
+        if not result["ok"]:
+            error_text = result["stderr"] or result["stdout"] or f"ssh exited with code {result['returncode']}"
+            return {"ok": False, "message": classify_ssh_error(error_text)}
+
+        content = result["stdout"]
+        fetched_at = now_iso()
+        content_hash = self.store_config_snapshot(router["router_uuid"], config_type, content, fetched_at)
+        return {
+            "ok": True,
+            "content": content,
+            "content_hash": content_hash,
+            "fetched_at": fetched_at,
+        }
+
+    def verify_wireless_is_up(self, router, settings):
+        return self.verify_router_config(router, settings, "wifi")
+
+    def verify_router_config(self, router, settings, config_type, expected_content=None):
+        if config_type == "wifi":
+            return self.verify_wireless_status(router, settings)
+        if config_type == "system":
+            return self.verify_system_config(router, settings, expected_content or "")
+        return {"ok": False, "message": "Unsupported config type."}
+
+    def verify_wireless_status(self, router, settings):
+        address = router["address"]
+        private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
+        if not address or not private_key:
+            return {"ok": False, "message": "Router not reachable for verification."}
+
+        time.sleep(2)
+        result = self.run_ssh(address, private_key, ["ubus", "call", "network.wireless", "status"])
+        if result["timed_out"]:
+            return {"ok": False, "message": "Timed out waiting for Wi-Fi status."}
+        if not result["ok"]:
+            error_text = result["stderr"] or result["stdout"] or f"ssh exited with code {result['returncode']}"
+            return {"ok": False, "message": classify_ssh_error(error_text)}
+
+        try:
+            payload = json.loads(result["stdout"])
+        except json.JSONDecodeError:
+            return {"ok": False, "message": "Unable to parse Wi-Fi status."}
+
+        radio_states = []
+        for name, radio in payload.items():
+            if not isinstance(radio, dict):
+                continue
+            up = bool(radio.get("up"))
+            disabled = bool(radio.get("disabled"))
+            retry_failed = bool(radio.get("retry_setup_failed"))
+            pending = bool(radio.get("pending"))
+            if up and not disabled and not retry_failed and not pending:
+                radio_states.append(True)
+            else:
+                radio_states.append(False)
+        if radio_states and all(radio_states):
+            return {"ok": True, "message": "ok"}
+        return {"ok": False, "message": "Wi-Fi did not come back up normally."}
+
+    def verify_system_config(self, router, settings, expected_content):
+        address = router["address"]
+        private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
+        if not address:
+            return {"ok": False, "message": "Missing router address."}
+        if not private_key:
+            return {"ok": False, "message": "No usable SSH private key available."}
+
+        result = self.run_ssh(address, private_key, ["cat", SYSTEM_CONFIG_PATH], strip_output=False)
+        if result["timed_out"]:
+            return {"ok": False, "message": "Timed out reading system config."}
+        if not result["ok"]:
+            error_text = result["stderr"] or result["stdout"] or f"ssh exited with code {result['returncode']}"
+            return {"ok": False, "message": classify_ssh_error(error_text)}
+        if result["stdout"] != expected_content:
+            return {"ok": False, "message": "System config did not match the applied content."}
+        return {"ok": True, "message": "ok"}
+
+    def apply_wireless_config(self, router, settings, content):
+        return self.apply_router_config(router, settings, "wifi", content)
+
+    def apply_router_config(self, router, settings, config_type, content, current_target_content=None, preserve_target_hostname=False):
+        address = router["address"]
+        private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
+        spec = self.config_spec(config_type)
+        if not address:
+            return {"ok": False, "message": "Missing router address."}
+        if not private_key:
+            return {"ok": False, "message": "No usable SSH private key available."}
+        if spec is None:
+            return {"ok": False, "message": "Unsupported config type."}
+
+        if config_type == "system" and preserve_target_hostname and current_target_content is not None:
+            content = self.merge_system_hostname(content, current_target_content)
+
+        write_result = self.run_ssh(
+            address,
+            private_key,
+            ["sh", "-c", f"cat > {spec['path']}"],
+            input_text=content,
+        )
+        if write_result["timed_out"]:
+            return {"ok": False, "message": "Connection timed out"}
+        if not write_result["ok"]:
+            error_text = write_result["stderr"] or write_result["stdout"] or f"ssh exited with code {write_result['returncode']}"
+            return {"ok": False, "message": classify_ssh_error(error_text)}
+
+        for command in spec["apply_commands"]:
+            reload_result = self.run_ssh(address, private_key, command)
+            if reload_result["timed_out"]:
+                return {"ok": False, "message": f"Timed out during {config_type} reload."}
+            if not reload_result["ok"]:
+                error_text = reload_result["stderr"] or reload_result["stdout"] or f"ssh exited with code {reload_result['returncode']}"
+                return {"ok": False, "message": classify_ssh_error(error_text)}
+
+        verify = self.verify_router_config(router, settings, config_type, content)
+        if not verify["ok"]:
+            return verify
+
+        self.store_config_snapshot(router["router_uuid"], config_type, content, now_iso())
+        return {"ok": True, "message": "ok"}
+
+    def run_router_action(self, action, router_uuids):
+        config = self.load_config()
+        settings = config["settings"]
+        routers = {router["router_uuid"]: router for router in config["routers"]}
+        selected = [routers[router_uuid] for router_uuid in router_uuids if router_uuid in routers]
+
+        if not selected:
+            return {
+                "status": "error",
+                "message": "No matching routers selected.",
+                "results": [],
+            }
+
+        futures = [self.executor.submit(self.perform_router_action, router, settings, action) for router in selected]
+        results = [future.result() for future in as_completed(futures)]
+        return {
+            "status": "ok",
+            "action": action,
+            "requested": len(router_uuids),
+            "matched": len(selected),
+            "successful": sum(1 for item in results if item["ok"]),
+            "failed": sum(1 for item in results if not item["ok"]),
+            "results": sorted(results, key=lambda item: item.get("address", "")),
+        }
+
+    def fetch_all_wireless_configs(self):
+        return self.fetch_all_configs("wifi")
+
+    def fetch_all_configs(self, config_type):
+        settings, routers = self.router_map()
+        futures = {
+            self.executor.submit(self.fetch_router_config, router, settings, config_type): router
+            for router in routers.values()
+        }
+        results = {}
+        for future in as_completed(futures):
+            router = futures[future]
+            results[router["router_uuid"]] = future.result()
+        return settings, routers, results
+
+    def sync_wifi_configs(self, router_uuids):
+        return self.sync_configs_by_type(router_uuids, "wifi")
+
+    def sync_configs_by_type(self, router_uuids, config_type):
+        settings, routers, fetched = self.fetch_all_configs(config_type)
+        selected = [routers[router_uuid] for router_uuid in router_uuids if router_uuid in routers]
+        if not selected:
+            return {"status": "error", "message": "No matching routers selected.", "results": []}
+
+        results = []
+        for router in selected:
+            source_uuid = (router.get(self.config_field_name(config_type)) or "").strip()
+            address = router.get("address") or ""
+            if source_uuid == "":
+                results.append({"router_uuid": router["router_uuid"], "address": address, "config_type": config_type, "ok": True, "changed": False, "message": f"No {config_type} sync source configured."})
+                continue
+            if source_uuid == router["router_uuid"]:
+                results.append({"router_uuid": router["router_uuid"], "address": address, "config_type": config_type, "ok": False, "changed": False, "message": "Router cannot sync from itself."})
+                continue
+            if source_uuid not in routers:
+                results.append({"router_uuid": router["router_uuid"], "address": address, "config_type": config_type, "ok": False, "changed": False, "message": "Sync source router not found."})
+                continue
+
+            source_router = routers[source_uuid]
+            target_fetch = fetched.get(router["router_uuid"], {"ok": False, "message": "Config unavailable."})
+            source_fetch = fetched.get(source_uuid, {"ok": False, "message": "Config unavailable."})
+            if not target_fetch.get("ok"):
+                results.append({"router_uuid": router["router_uuid"], "address": address, "config_type": config_type, "ok": False, "changed": False, "message": "Could not fetch target config: " + target_fetch.get("message", "error")})
+                continue
+            if not source_fetch.get("ok"):
+                results.append({"router_uuid": router["router_uuid"], "address": address, "config_type": config_type, "ok": False, "changed": False, "message": "Could not fetch source config: " + source_fetch.get("message", "error")})
+                continue
+
+            target_status = self.status_row(router["router_uuid"]) or {}
+            source_status = self.status_row(source_uuid) or {}
+            target_model = (target_status.get("hardware_model") or "").strip()
+            source_model = (source_status.get("hardware_model") or "").strip()
+            if target_model and source_model and target_model != source_model:
+                results.append({"router_uuid": router["router_uuid"], "address": address, "config_type": config_type, "ok": False, "changed": False, "message": "Sync source model does not match target."})
+                continue
+
+            if target_fetch["content_hash"] == source_fetch["content_hash"]:
+                results.append({"router_uuid": router["router_uuid"], "address": address, "config_type": config_type, "ok": True, "changed": False, "message": "Already in sync."})
+                continue
+
+            apply_result = self.apply_router_config(
+                router,
+                settings,
+                config_type,
+                source_fetch["content"],
+                current_target_content=target_fetch["content"],
+                preserve_target_hostname=(config_type == "system"),
+            )
+            if apply_result["ok"]:
+                results.append({"router_uuid": router["router_uuid"], "address": address, "config_type": config_type, "ok": True, "changed": True, "message": "Synced from " + (source_router.get("hostname") or source_router.get("address") or "source router") + "."})
+                continue
+
+            rollback_result = self.apply_router_config(router, settings, config_type, target_fetch["content"])
+            if rollback_result["ok"]:
+                results.append({"router_uuid": router["router_uuid"], "address": address, "config_type": config_type, "ok": False, "changed": False, "message": "Sync failed and previous config was restored: " + apply_result["message"]})
+            else:
+                results.append({"router_uuid": router["router_uuid"], "address": address, "config_type": config_type, "ok": False, "changed": False, "message": "Sync failed and rollback also failed: " + apply_result["message"] + " / " + rollback_result["message"]})
+
+        return {
+            "status": "ok",
+            "action": f"sync_{config_type}",
+            "requested": len(router_uuids),
+            "matched": len(selected),
+            "successful": sum(1 for item in results if item["ok"]),
+            "failed": sum(1 for item in results if not item["ok"]),
+            "changed": sum(1 for item in results if item.get("changed")),
+            "results": sorted(results, key=lambda item: item.get("address", "")),
+        }
+
+    def restore_wifi_backup(self, router_uuid, content_hash):
+        return self.restore_config_backup(router_uuid, "wifi", content_hash)
+
+    def restore_config_backup(self, router_uuid, config_type, content_hash):
+        settings, routers = self.router_map()
+        router = routers.get(router_uuid)
+        if router is None:
+            return {"status": "error", "message": "Router not found."}
+
+        backup_content = self.config_backup_content(router_uuid, config_type, content_hash)
+        if backup_content is None:
+            return {"status": "error", "message": "Backup not found."}
+
+        current_fetch = self.fetch_router_config(router, settings, config_type)
+        if not current_fetch.get("ok"):
+            return {"status": "error", "message": "Could not fetch current config: " + current_fetch.get("message", "error")}
+
+        if current_fetch["content_hash"] == content_hash:
+            return {"status": "ok", "message": "Router already has this config.", "restored": False}
+
+        apply_result = self.apply_router_config(router, settings, config_type, backup_content)
+        if apply_result["ok"]:
+            return {"status": "ok", "message": "Backup restored.", "restored": True}
+
+        rollback_result = self.apply_router_config(router, settings, config_type, current_fetch["content"])
+        if rollback_result["ok"]:
+            return {"status": "error", "message": "Restore failed and previous config was restored: " + apply_result["message"]}
+
+        return {"status": "error", "message": "Restore failed and rollback also failed: " + apply_result["message"] + " / " + rollback_result["message"]}
+
+    def sync_all_configs(self, router_uuids):
+        all_results = []
+        changed = 0
+        successful = 0
+        failed = 0
+        for config_type in CONFIG_TYPES:
+            result = self.sync_configs_by_type(router_uuids, config_type)
+            if result.get("status") != "ok":
+                return result
+            all_results.extend(result["results"])
+            changed += result.get("changed", 0)
+            successful += result.get("successful", 0)
+            failed += result.get("failed", 0)
+        return {
+            "status": "ok",
+            "action": "sync_configs",
+            "requested": len(router_uuids),
+            "matched": len(router_uuids),
+            "successful": successful,
+            "failed": failed,
+            "changed": changed,
+            "results": sorted(all_results, key=lambda item: (item.get("address", ""), item.get("config_type", ""))),
         }
 
     def trigger_poll(self):
@@ -714,22 +1569,60 @@ class BrokerState:
             }
 
     def router_rows(self):
-        with self._db() as conn:
+        with self._db_context() as conn:
             rows = conn.execute(
                 """
-                SELECT router_uuid, address, configured_hostname, description, ssh_key_ref,
-                       reachable, status_text, version, detected_hostname, load_1m,
-                       uptime_seconds, memory_used_pct, wifi_clients, best_signal_dbm,
-                       worst_signal_dbm, signal_histogram, latency_ms,
-                       last_seen, last_error, updated_at
+                SELECT router_status.router_uuid, router_status.address, router_status.configured_hostname, router_status.description, router_status.ssh_key_ref,
+                       router_status.reachable, router_status.status_text, router_status.version, router_status.hardware_model, router_status.detected_hostname, router_status.load_1m,
+                       router_status.uptime_seconds, router_status.memory_used_pct, router_status.wifi_clients, router_status.wifi_clients_by_radio, router_status.wifi_clients_by_network, router_status.best_signal_dbm,
+                       router_status.worst_signal_dbm, router_status.signal_histogram, router_status.latency_ms,
+                       router_status.last_seen, router_status.last_error, router_status.updated_at,
+                       wifi_state.content_hash AS wireless_content_hash,
+                       wifi_state.fetched_at AS wireless_fetched_at,
+                       system_state.content_hash AS system_content_hash,
+                       system_state.fetched_at AS system_fetched_at,
+                       firewall_state.content_hash AS firewall_content_hash,
+                       firewall_state.fetched_at AS firewall_fetched_at,
+                       dhcp_state.content_hash AS dhcp_content_hash,
+                       dhcp_state.fetched_at AS dhcp_fetched_at,
+                       rpcd_state.content_hash AS rpcd_content_hash,
+                       rpcd_state.fetched_at AS rpcd_fetched_at
                 FROM router_status
-                ORDER BY address COLLATE NOCASE
+                LEFT JOIN router_config_state AS wifi_state
+                  ON wifi_state.router_uuid = router_status.router_uuid AND wifi_state.config_type = 'wifi'
+                LEFT JOIN router_config_state AS system_state
+                  ON system_state.router_uuid = router_status.router_uuid AND system_state.config_type = 'system'
+                LEFT JOIN router_config_state AS firewall_state
+                  ON firewall_state.router_uuid = router_status.router_uuid AND firewall_state.config_type = 'firewall'
+                LEFT JOIN router_config_state AS dhcp_state
+                  ON dhcp_state.router_uuid = router_status.router_uuid AND dhcp_state.config_type = 'dhcp'
+                LEFT JOIN router_config_state AS rpcd_state
+                  ON rpcd_state.router_uuid = router_status.router_uuid AND rpcd_state.config_type = 'rpcd'
+                ORDER BY router_status.address COLLATE NOCASE
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def client_rows(self):
+        with self._db_context() as conn:
+            rows = conn.execute(
+                """
+                SELECT router_client_status.router_uuid, router_client_status.client_mac, router_client_status.ip_address,
+                       router_client_status.network_name, router_client_status.radio_name, router_client_status.signal_dbm,
+                       router_client_status.rx_bytes, router_client_status.tx_bytes, router_client_status.connected_seconds,
+                       router_client_status.updated_at,
+                       router_status.address AS router_address, router_status.configured_hostname, router_status.detected_hostname
+                FROM router_client_status
+                JOIN router_status ON router_status.router_uuid = router_client_status.router_uuid
+                ORDER BY router_client_status.client_mac COLLATE NOCASE,
+                         router_status.address COLLATE NOCASE,
+                         router_client_status.network_name COLLATE NOCASE
                 """
             ).fetchall()
         return [dict(row) for row in rows]
 
 
-STATE = BrokerState()
+STATE = None
 
 
 class BrokerHTTPServer(ThreadingHTTPServer):
@@ -751,22 +1644,136 @@ class BrokerHandler(BaseHTTPRequestHandler):
         return
 
     def do_GET(self):
-        if self.path == "/v1/status":
+        parsed = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed.query)
+        if parsed.path == "/v1/status":
             self._send(200, STATE.status_payload())
-        elif self.path == "/v1/routers":
+        elif parsed.path == "/v1/routers":
             self._send(200, {"status": "ok", "routers": STATE.router_rows()})
+        elif parsed.path == "/v1/clients":
+            self._send(200, {"status": "ok", "clients": STATE.client_rows()})
+        elif parsed.path == "/v1/config-backups":
+            router_uuid = (query.get("router_uuid") or [""])[0]
+            config_type = (query.get("config_type") or [""])[0]
+            if config_type not in CONFIG_TYPES:
+                self._send(400, {"status": "error", "message": "Unsupported config type", "backups": []})
+                return
+            self._send(
+                200,
+                {
+                    "status": "ok",
+                    "router_uuid": router_uuid,
+                    "config_type": config_type,
+                    "backups": STATE.config_backups(router_uuid, config_type),
+                },
+            )
+        elif parsed.path == "/v1/wifi-backups":
+            router_uuid = (query.get("router_uuid") or [""])[0]
+            self._send(200, {"status": "ok", "router_uuid": router_uuid, "backups": STATE.wireless_backups(router_uuid)})
         else:
             self._send(404, {"status": "error", "message": "Not found"})
 
     def do_POST(self):
-        if self.path == "/v1/poll-now":
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/v1/poll-now":
             accepted = STATE.trigger_poll()
             self._send(200, {"status": "ok", "accepted": accepted})
+        elif parsed.path == "/v1/router-actions":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                content_length = 0
+            raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+
+            try:
+                payload = json.loads(raw_body.decode("utf-8") or "{}")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send(400, {"status": "error", "message": "Invalid JSON payload"})
+                return
+
+            action = str(payload.get("action") or "").strip()
+            routers = payload.get("routers") or []
+            if not isinstance(routers, list):
+                self._send(400, {"status": "error", "message": "Routers must be a list"})
+                return
+
+            result = STATE.run_router_action(action, [str(item) for item in routers if str(item).strip()])
+            self._send(200 if result.get("status") == "ok" else 400, result)
+        elif parsed.path == "/v1/wifi-sync":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                content_length = 0
+            raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                payload = json.loads(raw_body.decode("utf-8") or "{}")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send(400, {"status": "error", "message": "Invalid JSON payload"})
+                return
+            routers = payload.get("routers") or []
+            if not isinstance(routers, list):
+                self._send(400, {"status": "error", "message": "Routers must be a list"})
+                return
+            result = STATE.sync_wifi_configs([str(item) for item in routers if str(item).strip()])
+            self._send(200 if result.get("status") == "ok" else 400, result)
+        elif parsed.path == "/v1/config-sync":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                content_length = 0
+            raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                payload = json.loads(raw_body.decode("utf-8") or "{}")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send(400, {"status": "error", "message": "Invalid JSON payload"})
+                return
+            routers = payload.get("routers") or []
+            if not isinstance(routers, list):
+                self._send(400, {"status": "error", "message": "Routers must be a list"})
+                return
+            result = STATE.sync_all_configs([str(item) for item in routers if str(item).strip()])
+            self._send(200 if result.get("status") == "ok" else 400, result)
+        elif parsed.path == "/v1/wifi-restore":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                content_length = 0
+            raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                payload = json.loads(raw_body.decode("utf-8") or "{}")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send(400, {"status": "error", "message": "Invalid JSON payload"})
+                return
+            router_uuid = str(payload.get("router_uuid") or "").strip()
+            content_hash = str(payload.get("content_hash") or "").strip()
+            result = STATE.restore_wifi_backup(router_uuid, content_hash)
+            self._send(200 if result.get("status") == "ok" else 400, result)
+        elif parsed.path == "/v1/config-restore":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                content_length = 0
+            raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                payload = json.loads(raw_body.decode("utf-8") or "{}")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send(400, {"status": "error", "message": "Invalid JSON payload"})
+                return
+            router_uuid = str(payload.get("router_uuid") or "").strip()
+            config_type = str(payload.get("config_type") or "").strip()
+            content_hash = str(payload.get("content_hash") or "").strip()
+            if config_type not in CONFIG_TYPES:
+                self._send(400, {"status": "error", "message": "Unsupported config type"})
+                return
+            result = STATE.restore_config_backup(router_uuid, config_type, content_hash)
+            self._send(200 if result.get("status") == "ok" else 400, result)
         else:
             self._send(404, {"status": "error", "message": "Not found"})
 
 
 def main():
+    global STATE
+    STATE = BrokerState()
     scheduler_thread = threading.Thread(target=STATE.scheduler, daemon=True)
     scheduler_thread.start()
 

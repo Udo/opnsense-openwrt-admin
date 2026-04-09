@@ -33,6 +33,60 @@
         </grid_view>
     </field>
     <field>
+        <id>router.sync_wifi_config_from</id>
+        <label>Sync wifi config from</label>
+        <type>dropdown</type>
+        <help>Select another router of the same model to serve as the source for Wi-Fi config sync.</help>
+        <grid_view>
+            <visible>false</visible>
+        </grid_view>
+    </field>
+    <field>
+        <id>router.sync_system_config_from</id>
+        <label>Sync system config from</label>
+        <type>dropdown</type>
+        <help>Select another router of the same model to serve as the source for system config sync. The target hostname will be preserved.</help>
+        <grid_view>
+            <visible>false</visible>
+        </grid_view>
+    </field>
+    <field>
+        <id>router.sync_firewall_config_from</id>
+        <label>Sync firewall config from</label>
+        <type>dropdown</type>
+        <help>Select another router of the same model to serve as the source for firewall config sync.</help>
+        <grid_view>
+            <visible>false</visible>
+        </grid_view>
+    </field>
+    <field>
+        <id>router.sync_dhcp_config_from</id>
+        <label>Sync dhcp config from</label>
+        <type>dropdown</type>
+        <help>Select another router of the same model to serve as the source for DHCP config sync.</help>
+        <grid_view>
+            <visible>false</visible>
+        </grid_view>
+    </field>
+    <field>
+        <id>router.sync_rpcd_config_from</id>
+        <label>Sync rpcd config from</label>
+        <type>dropdown</type>
+        <help>Select another router of the same model to serve as the source for rpcd config sync.</help>
+        <grid_view>
+            <visible>false</visible>
+        </grid_view>
+    </field>
+    <field>
+        <id>router.sync_status</id>
+        <label>Config Source</label>
+        <type>text</type>
+        <help>The configured config sync source and whether the target is currently in sync.</help>
+        <grid_view>
+            <width>16em</width>
+        </grid_view>
+    </field>
+    <field>
         <id>router.status</id>
         <label>Status</label>
         <type>text</type>
@@ -48,6 +102,15 @@
         <help>Placeholder firmware version until live polling is implemented.</help>
         <grid_view>
             <width>10em</width>
+        </grid_view>
+    </field>
+    <field>
+        <id>router.hardware</id>
+        <label>Hardware</label>
+        <type>text</type>
+        <help>Detected hardware model from the router.</help>
+        <grid_view>
+            <width>16em</width>
         </grid_view>
     </field>
 </form>

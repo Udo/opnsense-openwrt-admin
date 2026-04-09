@@ -4,8 +4,6 @@ OPNsense plugin scaffold for administering a fleet of OpenWrt routers.
 
 ## Current status
 
-The repository now contains the first minimal OPNsense plugin structure:
-
 - `Makefile` and `pkg-descr` for plugin packaging metadata
 - MVC and API controllers under `src/opnsense/mvc/app/controllers/OPNsense/OpenWrtAdmin`
 - Persistent model storage under `src/opnsense/mvc/app/models/OPNsense/OpenWrtAdmin`
@@ -26,3 +24,15 @@ On current OPNsense builds the menu cache is stored at `/var/lib/php/tmp/opnsens
 The initial page is exposed at `/ui/openwrtadmin`.
 
 For this environment, use `scripts/deploy-dev.sh` to copy the current MVC files, broker files, and startup hooks to `uh-firewall`, refresh the menu cache, restart `configd`, and restart the broker.
+
+## Testing
+
+The broker has a stdlib-only unit test suite under `tests/` that avoids real SSH and exercises our config sync logic with temporary state and mocks.
+
+Run it with:
+
+`make test`
+
+or directly:
+
+`python3 -m unittest discover -s tests -p 'test_*.py'`
