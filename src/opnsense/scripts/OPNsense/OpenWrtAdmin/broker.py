@@ -198,6 +198,7 @@ class BrokerState:
                     wifi_clients INTEGER,
                     wifi_clients_by_radio TEXT,
                     wifi_clients_by_network TEXT,
+                    radio_channels TEXT,
                     best_signal_dbm INTEGER,
                     worst_signal_dbm INTEGER,
                     signal_histogram TEXT,
@@ -216,6 +217,7 @@ class BrokerState:
             self._ensure_column(conn, "router_status", "wifi_clients", "INTEGER")
             self._ensure_column(conn, "router_status", "wifi_clients_by_radio", "TEXT")
             self._ensure_column(conn, "router_status", "wifi_clients_by_network", "TEXT")
+            self._ensure_column(conn, "router_status", "radio_channels", "TEXT")
             self._ensure_column(conn, "router_status", "hardware_model", "TEXT")
             self._ensure_column(conn, "router_status", "best_signal_dbm", "INTEGER")
             self._ensure_column(conn, "router_status", "worst_signal_dbm", "INTEGER")
@@ -372,10 +374,10 @@ class BrokerState:
                     INSERT INTO router_status (
                         router_uuid, address, configured_hostname, description, ssh_key_ref,
                         reachable, status_text, version, hardware_model, detected_hostname, load_1m,
-                        uptime_seconds, memory_used_pct, wifi_clients, wifi_clients_by_radio, wifi_clients_by_network, best_signal_dbm,
+                        uptime_seconds, memory_used_pct, wifi_clients, wifi_clients_by_radio, wifi_clients_by_network, radio_channels, best_signal_dbm,
                         worst_signal_dbm, signal_histogram, latency_ms,
                         last_seen, last_error, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 0, 'Pending', '', '', '', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)
+                    ) VALUES (?, ?, ?, ?, ?, 0, 'Pending', '', '', '', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)
                     ON CONFLICT(router_uuid) DO UPDATE SET
                         address=excluded.address,
                         configured_hostname=excluded.configured_hostname,
@@ -525,6 +527,52 @@ class BrokerState:
             "worst_signal_dbm": min(signals),
             "signal_histogram": compact_json(histogram),
         }
+
+    def parse_radio_channels(self, wireless_status_payload, hostapd_status_payloads):
+        if not isinstance(wireless_status_payload, dict):
+            return None
+
+        active_channels = {}
+        for payload in hostapd_status_payloads:
+            if not isinstance(payload, dict):
+                continue
+            phy = str(payload.get("phy") or "").strip()
+            channel = payload.get("channel")
+            if phy and channel not in (None, ""):
+                active_channels[phy] = str(channel)
+
+        labels = []
+        for radio_name, radio in sorted(wireless_status_payload.items()):
+            if not isinstance(radio, dict):
+                continue
+            config = radio.get("config") or {}
+            band = str(config.get("band") or "").strip()
+            configured = str(config.get("channel") or "").strip()
+            interfaces = radio.get("interfaces") or []
+            phy = ""
+            if interfaces and isinstance(interfaces, list) and isinstance(interfaces[0], dict):
+                ifname = str(interfaces[0].get("ifname") or "").strip()
+                if ifname:
+                    phy = ifname.split("-", 1)[0]
+
+            actual = active_channels.get(phy, "")
+            if band == "2g":
+                label = "2.4 GHz"
+            elif band == "5g":
+                label = "5 GHz"
+            elif band == "6g":
+                label = "6 GHz"
+            else:
+                label = radio_name
+
+            if configured == "auto" and actual:
+                value = f"auto ({actual})"
+            else:
+                value = configured or actual or "---"
+
+            labels.append(f"{label}: {value}")
+
+        return compact_json(labels) if labels else None
 
     def parse_client_associations(self, hostapd_outputs):
         associations = []
@@ -702,6 +750,7 @@ class BrokerState:
             "wifi_clients": None,
             "wifi_clients_by_radio": None,
             "wifi_clients_by_network": None,
+            "radio_channels": None,
             "best_signal_dbm": None,
             "worst_signal_dbm": None,
             "signal_histogram": None,
@@ -717,6 +766,7 @@ class BrokerState:
         username = router.get("ssh_username") or "root"
         private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
         router_uuid = router["router_uuid"]
+        updated_at = now_iso()
 
         if not address:
             return self._make_error_result(router_uuid, "Invalid", "Missing router address.")
@@ -750,12 +800,22 @@ class BrokerState:
         wifi_clients = None
         wifi_clients_by_radio = None
         wifi_clients_by_network = None
+        radio_channels = None
         signal_stats = {
             "best_signal_dbm": None,
             "worst_signal_dbm": None,
             "signal_histogram": None,
         }
         client_associations = []
+        hostapd_status_payloads = []
+        wireless_status_payload = None
+        wireless_status_result = self.run_ssh(address, private_key, ["ubus", "call", "network.wireless", "status"], username=username)
+        latency += wireless_status_result["latency_ms"]
+        if wireless_status_result["ok"] and not wireless_status_result["timed_out"] and wireless_status_result["stdout"]:
+            try:
+                wireless_status_payload = json.loads(wireless_status_result["stdout"])
+            except json.JSONDecodeError:
+                wireless_status_payload = None
         hostapd_list_result = self.run_ssh(address, private_key, ["ubus", "list", "hostapd.*"], username=username)
         latency += hostapd_list_result["latency_ms"]
         if hostapd_list_result["timed_out"]:
@@ -770,6 +830,7 @@ class BrokerState:
                 if status_result["ok"] and not status_result["timed_out"] and status_result["stdout"]:
                     try:
                         status_payload = json.loads(status_result["stdout"])
+                        hostapd_status_payloads.append(status_payload)
                         network_name = str(status_payload.get("ssid") or network_name)
                     except json.JSONDecodeError:
                         pass
@@ -793,8 +854,11 @@ class BrokerState:
             wifi_clients_by_network = wifi_stats["by_network"]
             signal_stats = self.parse_signal_stats(hostapd_outputs)
             client_associations = self.parse_client_associations(hostapd_outputs)
+            radio_channels = self.parse_radio_channels(wireless_status_payload, hostapd_status_payloads)
         elif "Command failed: Not found" in (hostapd_list_result["stderr"] or hostapd_list_result["stdout"]):
             wifi_clients = None
+        if radio_channels is None:
+            radio_channels = self.parse_radio_channels(wireless_status_payload, hostapd_status_payloads)
 
         health = self.parse_health(system_info)
         release = payload.get("release") or {}
@@ -811,6 +875,7 @@ class BrokerState:
             "wifi_clients": wifi_clients,
             "wifi_clients_by_radio": wifi_clients_by_radio,
             "wifi_clients_by_network": wifi_clients_by_network,
+            "radio_channels": radio_channels,
             "best_signal_dbm": signal_stats["best_signal_dbm"],
             "worst_signal_dbm": signal_stats["worst_signal_dbm"],
             "signal_histogram": signal_stats["signal_histogram"],
@@ -893,7 +958,7 @@ class BrokerState:
                     """
                     UPDATE router_status
                     SET reachable=?, status_text=?, version=?, hardware_model=?, detected_hostname=?, load_1m=?,
-                        uptime_seconds=?, memory_used_pct=?, wifi_clients=?, wifi_clients_by_radio=?, wifi_clients_by_network=?, best_signal_dbm=?,
+                        uptime_seconds=?, memory_used_pct=?, wifi_clients=?, wifi_clients_by_radio=?, wifi_clients_by_network=?, radio_channels=?, best_signal_dbm=?,
                         worst_signal_dbm=?, signal_histogram=?, rx_bps=?, tx_bps=?, latency_ms=?,
                         last_seen=?, last_error=?, updated_at=?
                     WHERE router_uuid=?
@@ -910,6 +975,7 @@ class BrokerState:
                         item["wifi_clients"],
                         item["wifi_clients_by_radio"],
                         item["wifi_clients_by_network"],
+                        item["radio_channels"],
                         item["best_signal_dbm"],
                         item["worst_signal_dbm"],
                         item["signal_histogram"],
@@ -1687,7 +1753,7 @@ pgrep -af usteer >/dev/null 2>&1
                 """
                 SELECT router_status.router_uuid, router_status.address, router_status.configured_hostname, router_status.description, router_status.ssh_key_ref,
                        router_status.reachable, router_status.status_text, router_status.version, router_status.hardware_model, router_status.detected_hostname, router_status.load_1m,
-                       router_status.uptime_seconds, router_status.memory_used_pct, router_status.wifi_clients, router_status.wifi_clients_by_radio, router_status.wifi_clients_by_network, router_status.best_signal_dbm,
+                       router_status.uptime_seconds, router_status.memory_used_pct, router_status.wifi_clients, router_status.wifi_clients_by_radio, router_status.wifi_clients_by_network, router_status.radio_channels, router_status.best_signal_dbm,
                        router_status.worst_signal_dbm, router_status.signal_histogram, router_status.rx_bps, router_status.tx_bps, router_status.latency_ms,
                        router_status.last_seen, router_status.last_error, router_status.updated_at,
                        wifi_state.content_hash AS wifi_content_hash,

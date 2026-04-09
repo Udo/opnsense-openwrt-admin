@@ -5,6 +5,7 @@
         var tbody = $("#openwrtAdminDashboardRows");
         var statusLine = $("#openwrtAdminDashboardStatus");
         var brokerBanner = "#openwrtAdminDashboardBrokerBanner";
+        var dhcpDescriptionsByAddress = JSON.parse({{ dhcpDescriptionsByAddressJson|json_encode }});
 
         function formatLoad(value) {
             return value === null || value === undefined ? "n/a" : Number(value).toFixed(2);
@@ -147,6 +148,52 @@
             return wrapper;
         }
 
+        function renderChannels(router) {
+            function renderPlaceholder() {
+                return $("<span>", {
+                    class: "text-muted",
+                    text: "n/a"
+                });
+            }
+
+            if (!router.radio_channels) {
+                return renderPlaceholder();
+            }
+
+            var values = router.radio_channels;
+            if (typeof values === "string") {
+                try {
+                    values = JSON.parse(values);
+                } catch (e) {
+                    values = null;
+                }
+            }
+
+            if (!Array.isArray(values) || !values.length) {
+                return renderPlaceholder();
+            }
+
+            var wrapper = $("<div>");
+            values.forEach(function(entry) {
+                wrapper.append(
+                    $("<div>", {
+                        class: "small",
+                        text: entry
+                    })
+                );
+            });
+            return wrapper;
+        }
+
+        function descriptionFallback(router) {
+            if (router.description && String(router.description).trim() !== "") {
+                return String(router.description).trim();
+            }
+
+            var addressKey = String(router.address || "").toLowerCase();
+            return dhcpDescriptionsByAddress[addressKey] || "";
+        }
+
         function renderRows(routers) {
             tbody.empty();
 
@@ -154,7 +201,7 @@
                 tbody.append(
                     $("<tr>").append(
                         $("<td>", {
-                            colspan: 9,
+                            colspan: 10,
                             class: "text-center text-muted",
                             text: "{{ lang._('No routers registered yet.') }}"
                         })
@@ -165,6 +212,7 @@
 
             routers.forEach(function(router) {
                 var hostname = router.detected_hostname || router.configured_hostname || "";
+                var description = descriptionFallback(router);
                 var statusText = router.status_text || "Unknown";
                 var statusClass = "label-danger";
 
@@ -186,7 +234,13 @@
                 tbody.append(
                     $("<tr>")
                         .append($("<td>").text(router.address || ""))
-                        .append($("<td>").text(hostname))
+                        .append(
+                            $("<td>").append(
+                                $("<div>").text(hostname)
+                            ).append(
+                                description ? $("<div>", {class: "small text-muted", text: description}) : ""
+                            )
+                        )
                         .append(
                             $("<td>").append(
                                 $("<span>", {
@@ -199,6 +253,7 @@
                         .append($("<td>").text(openwrtAdminFormatUptime(router.uptime_seconds)))
                         .append($("<td>").text(formatPercent(router.memory_used_pct)))
                         .append($("<td>").append(renderWifiClients(router)))
+                        .append($("<td>").append(renderChannels(router)))
                         .append($("<td>").text("rx " + openwrtAdminFormatRate(router.rx_bps) + " / tx " + openwrtAdminFormatRate(router.tx_bps)))
                         .append($("<td>").append(renderSignal(router)))
                 );
@@ -238,6 +293,7 @@
                                 <th>{{ lang._('Uptime') }}</th>
                                 <th>{{ lang._('Memory Used') }}</th>
                                 <th>{{ lang._('WiFi Clients / Network') }}</th>
+                                <th>{{ lang._('Channels') }}</th>
                                 <th>{{ lang._('Bandwidth') }}</th>
                                 <th>{{ lang._('Signal') }}</th>
                             </tr>
