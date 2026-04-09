@@ -520,22 +520,22 @@
             <strong>{{ lang._('Selected routers') }}</strong>
             <span class="text-muted">{{ lang._('Choose an action to run on the currently selected rows.') }}</span>
             <div class="top-padding">
-                <button class="btn btn-default" id="bulkSyncRoutersBtn" type="button" disabled="disabled" title="{{ lang._('Pull current configs, compare them with configured parent routers, push parent configs where needed, and reload affected services.') }}">
+                <button class="btn btn-primary" id="bulkSyncRoutersBtn" type="button" disabled="disabled" title="{{ lang._('Pull current configs, compare them with configured parent routers, push parent configs where needed, and reload affected services.') }}">
                     <span class="fa fa-random fa-fw"></span> {{ lang._('Sync Configs') }}
                 </button>
-                <button class="btn btn-default" id="bulkSysUpdateBtn" type="button" disabled="disabled" title="{{ lang._('Run apk update and apk upgrade on the selected routers.') }}">
+                <button class="btn btn-info" id="bulkSysUpdateBtn" type="button" disabled="disabled" title="{{ lang._('Run apk update and apk upgrade on the selected routers.') }}">
                     <span class="fa fa-download fa-fw"></span> {{ lang._('Sys Update') }}
                 </button>
-                <button class="btn btn-default" id="bulkRebootRoutersBtn" type="button" disabled="disabled" title="{{ lang._('Reboot the selected routers.') }}">
+                <button class="btn btn-warning" id="bulkRebootRoutersBtn" type="button" disabled="disabled" title="{{ lang._('Reboot the selected routers.') }}">
                     <span class="fa fa-refresh fa-fw"></span> {{ lang._('Reboot') }}
                 </button>
-                <button class="btn btn-default" id="bulkRadiosOnBtn" type="button" disabled="disabled" title="{{ lang._('Enable Wi-Fi radios on the selected routers.') }}">
+                <button class="btn btn-success" id="bulkRadiosOnBtn" type="button" disabled="disabled" title="{{ lang._('Enable Wi-Fi radios on the selected routers.') }}">
                     {{ lang._('Radios On') }}
                 </button>
-                <button class="btn btn-default" id="bulkRadiosOffBtn" type="button" disabled="disabled" title="{{ lang._('Disable Wi-Fi radios on the selected routers.') }}">
+                <button class="btn btn-warning" id="bulkRadiosOffBtn" type="button" disabled="disabled" title="{{ lang._('Disable Wi-Fi radios on the selected routers.') }}">
                     {{ lang._('Radios Off') }}
                 </button>
-                <button class="btn btn-default" id="bulkRoamingBaselineBtn" type="button" disabled="disabled" title="{{ lang._('Install usteer if needed and apply the standard roaming baseline: auto channels, 802.11r/k, BSS transition, and steering settings.') }}">
+                <button class="btn btn-info" id="bulkRoamingBaselineBtn" type="button" disabled="disabled" title="{{ lang._('Install usteer if needed and apply the standard roaming baseline: auto channels, 802.11r/k, BSS transition, and steering settings.') }}">
                     <span class="fa fa-exchange fa-fw"></span> {{ lang._('Apply Roaming Baseline') }}
                 </button>
             </div>
