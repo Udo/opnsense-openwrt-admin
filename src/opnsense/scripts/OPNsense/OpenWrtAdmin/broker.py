@@ -973,12 +973,12 @@ class BrokerState:
                         item["uptime_seconds"],
                         item["memory_used_pct"],
                         item["wifi_clients"],
-                        item["wifi_clients_by_radio"],
-                        item["wifi_clients_by_network"],
-                        item["radio_channels"],
-                        item["best_signal_dbm"],
-                        item["worst_signal_dbm"],
-                        item["signal_histogram"],
+                        item.get("wifi_clients_by_radio"),
+                        item.get("wifi_clients_by_network"),
+                        item.get("radio_channels"),
+                        item.get("best_signal_dbm"),
+                        item.get("worst_signal_dbm"),
+                        item.get("signal_histogram"),
                         router_rx_bps if client_associations else None,
                         router_tx_bps if client_associations else None,
                         item["latency_ms"],
@@ -1109,7 +1109,16 @@ set usteer.@usteer[0].roam_trigger_snr='-75'
 set usteer.@usteer[0].roam_trigger_interval='60000'
 set usteer.@usteer[0].link_measurement_interval='30000'
 del usteer.@usteer[0].ssid_list
-add_list usteer.@usteer[0].ssid_list='KGMobile'
+for section in $(uci show wireless | sed -n "s/^wireless\\.\\([^=]*\\)=wifi-iface$/\\1/p"); do
+    mode=$(uci -q get wireless.${section}.mode || true)
+    ssid=$(uci -q get wireless.${section}.ssid || true)
+    if [ "${mode}" = "ap" ] && [ -n "${ssid}" ]; then
+        add_list_output=$(uci add_list usteer.@usteer[0].ssid_list="${ssid}" 2>&1) || {
+            echo "${add_list_output}" >&2
+            exit 1
+        }
+    fi
+done
 commit wireless
 commit usteer
 UCI

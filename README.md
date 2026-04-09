@@ -2,6 +2,15 @@
 
 OPNsense plugin for managing a fleet of OpenWrt access points and routers from a central firewall UI.
 
+## Upstreaming notes
+
+This repository is intended to track an OPNsense plugin package suitable for submission to the official `opnsense/plugins` repository.
+
+- License: BSD-2-Clause
+- Runtime model: PHP MVC/UI + Python 3 stdlib broker + system SSH client
+- No precompiled binaries are shipped
+- The plugin should be proposed upstream via an issue first, then a pull request against `opnsense/plugins`
+
 ## Features
 
 - **Router inventory** — register OpenWrt routers by address, with live status polling (load, uptime, memory, firmware version, hardware model)
@@ -86,7 +95,7 @@ rm -f /var/lib/php/tmp/opnsense_menu_cache.xml
 
 The UI is available at `/ui/openwrtadmin`.
 
-For this development environment, use `scripts/deploy-dev.sh` to copy files, refresh the menu cache, restart `configd`, and restart the broker on the target host.
+For local development, `scripts/deploy-dev.sh` can be used to copy files to a target firewall, refresh the menu cache, restart `configd`, and restart the broker service.
 
 ## Configuration
 
@@ -116,3 +125,11 @@ make test
 # or
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
+
+## Submission checklist
+
+- Open an issue in `opnsense/plugins` first to discuss the plugin scope
+- Import the plugin under an appropriate category directory in that repository
+- Keep the code BSD-2-Clause licensed
+- Avoid precompiled binaries and undisclosed bundled dependencies
+- Disclose AI assistance in the pull request, as requested by OPNsense

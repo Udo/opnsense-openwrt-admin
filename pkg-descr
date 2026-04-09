@@ -1,4 +1,6 @@
-OpenWrt Admin provides an OPNsense plugin scaffold for managing a fleet of
-OpenWrt routers. The initial version adds a simple MVC-backed overview page
-to the OPNsense web interface as the starting point for device inventory,
-status, and management actions.
+OpenWrt Admin provides a central OPNsense interface for managing a fleet of
+OpenWrt routers and access points. It offers inventory management, status
+polling over SSH, Wi-Fi client visibility, configuration sync and backup
+workflows, and bulk operational actions from the OPNsense web interface.
+
+WWW: https://github.com/Udo/opnsense-openwrt-admin
