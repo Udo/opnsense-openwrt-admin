@@ -95,7 +95,13 @@ rm -f /var/lib/php/tmp/opnsense_menu_cache.xml
 
 The UI is available at `/ui/openwrtadmin`.
 
-For local development, `scripts/deploy-dev.sh` can be used to copy files to a target firewall, refresh the menu cache, restart `configd`, and restart the broker service.
+For local development, `scripts/deploy-dev.sh` can be used to copy files to a target firewall, refresh caches, reload syslog templates, restart `configd`, and restart the broker service.
+
+```sh
+scripts/deploy-dev.sh my-opnsense-host
+```
+
+If you use SSHFS mounts, the script will prefer `${MOUNT_BASE:-/root/mount_ssh}/<target-host>` automatically. Otherwise it falls back to SSH/SCP deployment.
 
 ## Configuration
 
