@@ -11,6 +11,7 @@ namespace OPNsense\OpenWrtAdmin\Api;
 use OPNsense\Base\ApiControllerBase;
 use OPNsense\Core\Backend;
 use OPNsense\OpenWrtAdmin\BrokerClient;
+use OPNsense\OpenWrtAdmin\Logger;
 
 class ServiceController extends ApiControllerBase
 {
@@ -153,17 +154,23 @@ class ServiceController extends ApiControllerBase
 
     public function startAction()
     {
-        return ['status' => trim((new Backend())->configdRun('openwrtadmin start'))];
+        $status = trim((new Backend())->configdRun('openwrtadmin start'));
+        Logger::info('ui.service.start', ['status' => $status]);
+        return ['status' => $status];
     }
 
     public function stopAction()
     {
-        return ['status' => trim((new Backend())->configdRun('openwrtadmin stop'))];
+        $status = trim((new Backend())->configdRun('openwrtadmin stop'));
+        Logger::info('ui.service.stop', ['status' => $status]);
+        return ['status' => $status];
     }
 
     public function restartAction()
     {
-        return ['status' => trim((new Backend())->configdRun('openwrtadmin restart'))];
+        $status = trim((new Backend())->configdRun('openwrtadmin restart'));
+        Logger::info('ui.service.restart', ['status' => $status]);
+        return ['status' => $status];
     }
 
     public function statusAction()
@@ -178,7 +185,14 @@ class ServiceController extends ApiControllerBase
 
     public function pollNowAction()
     {
-        return (new BrokerClient())->pollNow()['body'] ?? ['status' => 'error'];
+        $result = (new BrokerClient())->pollNow();
+        Logger::info('ui.poll_now', [
+            'ok' => $result['ok'] ?? false,
+            'status' => $result['status'] ?? 0,
+            'timed_out' => $result['timed_out'] ?? false,
+            'error' => $result['error'] ?? null,
+        ]);
+        return $result['body'] ?? ['status' => 'error'];
     }
 
     public function routersAction()
@@ -301,6 +315,11 @@ class ServiceController extends ApiControllerBase
         }
 
         $routerIds = array_values(array_filter(array_map('strval', $routers)));
+        Logger::info('ui.bulk_action.request', [
+            'action' => $action,
+            'router_count' => count($routerIds),
+            'router_ids' => $routerIds,
+        ]);
         $client = new BrokerClient();
         if ($action === 'sync_configs') {
             $result = $client->syncConfigs($routerIds);
@@ -309,9 +328,22 @@ class ServiceController extends ApiControllerBase
         }
 
         if (!empty($result['body']) && is_array($result['body'])) {
+            Logger::info('ui.bulk_action.result', [
+                'action' => $action,
+                'status' => $result['body']['status'] ?? null,
+                'successful' => $result['body']['successful'] ?? null,
+                'failed' => $result['body']['failed'] ?? null,
+                'changed' => $result['body']['changed'] ?? null,
+            ]);
             return $result['body'];
         }
 
+        Logger::error('ui.bulk_action.broker_failure', [
+            'action' => $action,
+            'http_status' => $result['status'] ?? 0,
+            'timed_out' => $result['timed_out'] ?? false,
+            'error' => $result['error'] ?? null,
+        ]);
         return $this->brokerFailure($result, 'Broker request failed.');
     }
 
@@ -328,6 +360,13 @@ class ServiceController extends ApiControllerBase
             return $result['body'];
         }
 
+        Logger::warning('ui.config_backups.broker_failure', [
+            'router_uuid' => $routerUuid,
+            'config_type' => $configType,
+            'http_status' => $result['status'] ?? 0,
+            'timed_out' => $result['timed_out'] ?? false,
+            'error' => $result['error'] ?? null,
+        ]);
         return $this->brokerFailure($result, 'Broker request failed.', true);
     }
 
@@ -340,11 +379,30 @@ class ServiceController extends ApiControllerBase
             return ['status' => 'error', 'message' => 'Router, config type and backup are required.'];
         }
 
+        Logger::info('ui.config_restore.request', [
+            'router_uuid' => $routerUuid,
+            'config_type' => $configType,
+            'content_hash' => $contentHash,
+        ]);
         $result = (new BrokerClient())->restoreConfigBackup($routerUuid, $configType, $contentHash);
         if (!empty($result['body']) && is_array($result['body'])) {
+            Logger::info('ui.config_restore.result', [
+                'router_uuid' => $routerUuid,
+                'config_type' => $configType,
+                'status' => $result['body']['status'] ?? null,
+                'message' => $result['body']['message'] ?? null,
+                'restored' => $result['body']['restored'] ?? null,
+            ]);
             return $result['body'];
         }
 
+        Logger::error('ui.config_restore.broker_failure', [
+            'router_uuid' => $routerUuid,
+            'config_type' => $configType,
+            'http_status' => $result['status'] ?? 0,
+            'timed_out' => $result['timed_out'] ?? false,
+            'error' => $result['error'] ?? null,
+        ]);
         return $this->brokerFailure($result, 'Broker request failed.');
     }
 

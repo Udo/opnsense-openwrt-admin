@@ -5,6 +5,7 @@
             <ClientStats VisibleName="Client Stats" order="20" url="/ui/openwrtadmin/client_stats"/>
             <Routers order="30" url="/ui/openwrtadmin"/>
             <Settings order="40" url="/ui/openwrtadmin/general"/>
+            <LogFile VisibleName="Log File" order="50" url="/ui/diagnostics/log/core/openwrtadmin"/>
         </OpenWrtAdmin>
     </Services>
 </menu>

@@ -6,6 +6,7 @@ import os
 import signal
 import sqlite3
 import subprocess
+import syslog
 import threading
 import time
 import urllib.parse
@@ -101,6 +102,14 @@ def compact_json(data):
     return json.dumps(data, separators=(",", ":"))
 
 
+def log_event(priority, event, **fields):
+    payload = {"event": event}
+    if fields:
+        payload["context"] = fields
+    syslog.openlog("openwrtadmin", syslog.LOG_PID, syslog.LOG_USER)
+    syslog.syslog(priority, compact_json(payload))
+
+
 def normalize_mac(value):
     if not isinstance(value, str):
         return ""
@@ -111,6 +120,16 @@ def normalize_mac(value):
 def integer_or_none(value):
     if value is None or value == "":
         return None
+
+
+def router_label(router):
+    if not isinstance(router, dict):
+        return ""
+    for key in ("detected_hostname", "configured_hostname", "hostname", "address"):
+        value = str(router.get(key) or "").strip()
+        if value:
+            return value
+    return ""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -889,6 +908,99 @@ class BrokerState:
     def write_poll_results(self, routers, results):
         router_map = {router["router_uuid"]: router for router in routers}
         with self._db_context() as conn:
+            previous_network_clients = {}
+            for row in conn.execute(
+                """
+                SELECT router_uuid, client_mac, ip_address, network_name, radio_name, signal_dbm
+                FROM router_client_status
+                """
+            ).fetchall():
+                client_mac = normalize_mac(row["client_mac"])
+                if client_mac == "":
+                    continue
+                previous_network_clients.setdefault(client_mac, []).append(
+                    {
+                        "router_uuid": str(row["router_uuid"] or ""),
+                        "ip_address": str(row["ip_address"] or ""),
+                        "network_name": str(row["network_name"] or ""),
+                        "radio_name": str(row["radio_name"] or ""),
+                        "signal_dbm": row["signal_dbm"],
+                    }
+                )
+
+            current_network_clients = {}
+            for item in results:
+                current_router_label = router_label(
+                    {
+                        "detected_hostname": item.get("detected_hostname"),
+                        "configured_hostname": router_map[item["router_uuid"]].get("hostname"),
+                        "address": router_map[item["router_uuid"]].get("address"),
+                    }
+                )
+                for client in item.get("client_associations") or []:
+                    client_mac = normalize_mac(client.get("client_mac"))
+                    if client_mac == "":
+                        continue
+                    current_network_clients.setdefault(client_mac, []).append(
+                        {
+                            "router_uuid": item["router_uuid"],
+                            "router_label": current_router_label,
+                            "ip_address": str(client.get("ip_address") or ""),
+                            "network_name": str(client.get("network_name") or ""),
+                            "radio_name": str(client.get("radio_name") or ""),
+                            "signal_dbm": client.get("signal_dbm"),
+                        }
+                    )
+
+            all_client_macs = sorted(set(previous_network_clients.keys()) | set(current_network_clients.keys()))
+            for client_mac in all_client_macs:
+                previous_entries = previous_network_clients.get(client_mac, [])
+                current_entries = current_network_clients.get(client_mac, [])
+                previous_router_ids = sorted({entry["router_uuid"] for entry in previous_entries if entry["router_uuid"]})
+                current_router_ids = sorted({entry["router_uuid"] for entry in current_entries if entry["router_uuid"]})
+
+                if not previous_router_ids and current_router_ids:
+                    first = current_entries[0]
+                    log_event(
+                        syslog.LOG_INFO,
+                        "broker.client.appeared",
+                        client_mac=client_mac,
+                        ip_address=first.get("ip_address") or None,
+                        ap=first.get("router_label") or None,
+                        network=first.get("network_name") or None,
+                        signal_dbm=first.get("signal_dbm"),
+                    )
+                    continue
+
+                if previous_router_ids and not current_router_ids:
+                    first = previous_entries[0]
+                    previous_router = router_map.get(first["router_uuid"], {"hostname": "", "address": ""})
+                    log_event(
+                        syslog.LOG_INFO,
+                        "broker.client.disappeared",
+                        client_mac=client_mac,
+                        ip_address=first.get("ip_address") or None,
+                        ap=router_label(previous_router) or None,
+                        network=first.get("network_name") or None,
+                        signal_dbm=first.get("signal_dbm"),
+                    )
+                    continue
+
+                if len(previous_router_ids) == 1 and len(current_router_ids) == 1 and previous_router_ids[0] != current_router_ids[0]:
+                    previous_first = previous_entries[0]
+                    current_first = current_entries[0]
+                    previous_router = router_map.get(previous_router_ids[0], {"hostname": "", "address": ""})
+                    log_event(
+                        syslog.LOG_INFO,
+                        "broker.client.changed_ap",
+                        client_mac=client_mac,
+                        ip_address=current_first.get("ip_address") or previous_first.get("ip_address") or None,
+                        from_ap=router_label(previous_router) or None,
+                        to_ap=current_first.get("router_label") or None,
+                        network=current_first.get("network_name") or previous_first.get("network_name") or None,
+                        signal_dbm=current_first.get("signal_dbm"),
+                    )
+
             for item in results:
                 router = router_map[item["router_uuid"]]
                 previous_clients = {
@@ -1020,6 +1132,7 @@ class BrokerState:
         self.sync_router_rows(routers)
 
         if not routers:
+            log_event(syslog.LOG_INFO, "broker.poll.summary", routers=0, reachable=0, unreachable=0, status="ok")
             return {"status": "ok", "routers": 0, "reachable": 0}
 
         futures = [self.executor.submit(self.poll_router, router, settings) for router in routers]
@@ -1027,12 +1140,14 @@ class BrokerState:
         self.write_poll_results(routers, results)
 
         reachable = sum(1 for item in results if item["reachable"])
-        return {
+        summary = {
             "status": "ok",
             "routers": len(results),
             "reachable": reachable,
             "unreachable": len(results) - reachable,
         }
+        log_event(syslog.LOG_INFO, "broker.poll.summary", **summary)
+        return summary
 
     def router_action_command(self, action):
         if action == "reboot":
@@ -1562,6 +1677,7 @@ pgrep -af usteer >/dev/null 2>&1
         selected = [routers[router_uuid] for router_uuid in router_uuids if router_uuid in routers]
 
         if not selected:
+            log_event(syslog.LOG_WARNING, "broker.router_action.no_match", action=action, requested=len(router_uuids))
             return {
                 "status": "error",
                 "message": "No matching routers selected.",
@@ -1570,7 +1686,7 @@ pgrep -af usteer >/dev/null 2>&1
 
         futures = [self.executor.submit(self.perform_router_action, router, settings, action) for router in selected]
         results = [future.result() for future in as_completed(futures)]
-        return {
+        response = {
             "status": "ok",
             "action": action,
             "requested": len(router_uuids),
@@ -1579,6 +1695,27 @@ pgrep -af usteer >/dev/null 2>&1
             "failed": sum(1 for item in results if not item["ok"]),
             "results": sorted(results, key=lambda item: item.get("address", "")),
         }
+        log_event(
+            syslog.LOG_INFO,
+            "broker.router_action.summary",
+            action=action,
+            requested=len(router_uuids),
+            matched=len(selected),
+            successful=response["successful"],
+            failed=response["failed"],
+        )
+        for item in response["results"]:
+            if item.get("ok"):
+                continue
+            log_event(
+                syslog.LOG_WARNING,
+                "broker.router_action.failure",
+                action=action,
+                router_uuid=item.get("router_uuid"),
+                address=item.get("address"),
+                message=item.get("message"),
+            )
+        return response
 
     def fetch_all_configs(self, config_type):
         settings, routers = self.router_map()
@@ -1596,6 +1733,7 @@ pgrep -af usteer >/dev/null 2>&1
         settings, routers, fetched = self.fetch_all_configs(config_type)
         selected = [routers[router_uuid] for router_uuid in router_uuids if router_uuid in routers]
         if not selected:
+            log_event(syslog.LOG_WARNING, "broker.config_sync.no_match", config_type=config_type, requested=len(router_uuids))
             return {"status": "error", "message": "No matching routers selected.", "results": []}
 
         results = []
@@ -1652,7 +1790,7 @@ pgrep -af usteer >/dev/null 2>&1
             else:
                 results.append({"router_uuid": router["router_uuid"], "address": address, "config_type": config_type, "ok": False, "changed": False, "message": "Sync failed and rollback also failed: " + apply_result["message"] + " / " + rollback_result["message"]})
 
-        return {
+        response = {
             "status": "ok",
             "action": f"sync_{config_type}",
             "requested": len(router_uuids),
@@ -1662,32 +1800,62 @@ pgrep -af usteer >/dev/null 2>&1
             "changed": sum(1 for item in results if item.get("changed")),
             "results": sorted(results, key=lambda item: item.get("address", "")),
         }
+        log_event(
+            syslog.LOG_INFO,
+            "broker.config_sync.summary",
+            config_type=config_type,
+            requested=len(router_uuids),
+            matched=len(selected),
+            successful=response["successful"],
+            failed=response["failed"],
+            changed=response["changed"],
+        )
+        for item in response["results"]:
+            log_priority = syslog.LOG_INFO if item.get("ok") else syslog.LOG_WARNING
+            log_event(
+                log_priority,
+                "broker.config_sync.result",
+                config_type=config_type,
+                router_uuid=item.get("router_uuid"),
+                address=item.get("address"),
+                ok=item.get("ok"),
+                changed=item.get("changed"),
+                message=item.get("message"),
+            )
+        return response
 
     def restore_config_backup(self, router_uuid, config_type, content_hash):
         settings, routers = self.router_map()
         router = routers.get(router_uuid)
         if router is None:
+            log_event(syslog.LOG_WARNING, "broker.config_restore.failure", router_uuid=router_uuid, config_type=config_type, reason="router_not_found")
             return {"status": "error", "message": "Router not found."}
 
         backup_content = self.config_backup_content(router_uuid, config_type, content_hash)
         if backup_content is None:
+            log_event(syslog.LOG_WARNING, "broker.config_restore.failure", router_uuid=router_uuid, config_type=config_type, reason="backup_not_found", content_hash=content_hash)
             return {"status": "error", "message": "Backup not found."}
 
         current_fetch = self.fetch_router_config(router, settings, config_type)
         if not current_fetch.get("ok"):
+            log_event(syslog.LOG_WARNING, "broker.config_restore.failure", router_uuid=router_uuid, config_type=config_type, reason="current_fetch_failed", message=current_fetch.get("message", "error"))
             return {"status": "error", "message": "Could not fetch current config: " + current_fetch.get("message", "error")}
 
         if current_fetch["content_hash"] == content_hash:
+            log_event(syslog.LOG_INFO, "broker.config_restore.noop", router_uuid=router_uuid, config_type=config_type, content_hash=content_hash)
             return {"status": "ok", "message": "Router already has this config.", "restored": False}
 
         apply_result = self.apply_router_config(router, settings, config_type, backup_content)
         if apply_result["ok"]:
+            log_event(syslog.LOG_INFO, "broker.config_restore.success", router_uuid=router_uuid, config_type=config_type, content_hash=content_hash)
             return {"status": "ok", "message": "Backup restored.", "restored": True}
 
         rollback_result = self.apply_router_config(router, settings, config_type, current_fetch["content"])
         if rollback_result["ok"]:
+            log_event(syslog.LOG_WARNING, "broker.config_restore.rollback", router_uuid=router_uuid, config_type=config_type, content_hash=content_hash, message=apply_result["message"])
             return {"status": "error", "message": "Restore failed and previous config was restored: " + apply_result["message"]}
 
+        log_event(syslog.LOG_ERR, "broker.config_restore.rollback_failed", router_uuid=router_uuid, config_type=config_type, content_hash=content_hash, apply_message=apply_result["message"], rollback_message=rollback_result["message"])
         return {"status": "error", "message": "Restore failed and rollback also failed: " + apply_result["message"] + " / " + rollback_result["message"]}
 
     def sync_all_configs(self, router_uuids):
@@ -1703,7 +1871,7 @@ pgrep -af usteer >/dev/null 2>&1
             changed += result.get("changed", 0)
             successful += result.get("successful", 0)
             failed += result.get("failed", 0)
-        return {
+        response = {
             "status": "ok",
             "action": "sync_configs",
             "requested": len(router_uuids),
@@ -1713,6 +1881,16 @@ pgrep -af usteer >/dev/null 2>&1
             "changed": changed,
             "results": sorted(all_results, key=lambda item: (item.get("address", ""), item.get("config_type", ""))),
         }
+        log_event(
+            syslog.LOG_INFO,
+            "broker.config_sync.all_summary",
+            requested=len(router_uuids),
+            matched=len(router_uuids),
+            successful=successful,
+            failed=failed,
+            changed=changed,
+        )
+        return response
 
     def trigger_poll(self):
         with self.lock:
@@ -1727,10 +1905,12 @@ pgrep -af usteer >/dev/null 2>&1
         with self.lock:
             self.last_poll_started = now_iso()
             self.last_poll_summary = {"status": "running"}
+        log_event(syslog.LOG_INFO, "broker.poll.started")
         try:
             summary = self.poll_all()
         except Exception as exc:
             summary = {"status": "error", "message": str(exc)}
+            log_event(syslog.LOG_ERR, "broker.poll.exception", message=str(exc))
         with self.lock:
             self.last_poll_finished = now_iso()
             self.last_poll_summary = summary
@@ -1925,10 +2105,12 @@ def main():
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
 
+    log_event(syslog.LOG_INFO, "broker.started", host=BROKER_HOST, port=BROKER_PORT)
     print(f"{LOG_PREFIX} listening on {BROKER_HOST}:{BROKER_PORT}", flush=True)
     try:
         httpd.serve_forever()
     finally:
+        log_event(syslog.LOG_INFO, "broker.stopped")
         httpd.server_close()
         STATE.close()
 

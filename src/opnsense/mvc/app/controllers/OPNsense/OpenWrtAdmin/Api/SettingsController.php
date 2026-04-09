@@ -10,6 +10,7 @@ namespace OPNsense\OpenWrtAdmin\Api;
 
 use OPNsense\Base\ApiMutableModelControllerBase;
 use OPNsense\OpenWrtAdmin\BrokerClient;
+use OPNsense\OpenWrtAdmin\Logger;
 use OPNsense\OpenWrtAdmin\SshKeyStore;
 
 class SettingsController extends ApiMutableModelControllerBase
@@ -215,17 +216,32 @@ class SettingsController extends ApiMutableModelControllerBase
 
     public function addRouterAction()
     {
-        return $this->addBase('router', 'routers.router');
+        $result = $this->addBase('router', 'routers.router');
+        Logger::info('ui.router.add', [
+            'result' => $result['result'] ?? null,
+            'uuid' => $result['uuid'] ?? null,
+        ]);
+        return $result;
     }
 
     public function setRouterAction($uuid)
     {
-        return $this->setBase('router', 'routers.router', $uuid);
+        $result = $this->setBase('router', 'routers.router', $uuid);
+        Logger::info('ui.router.save', [
+            'uuid' => (string)$uuid,
+            'result' => $result['result'] ?? null,
+        ]);
+        return $result;
     }
 
     public function delRouterAction($uuid)
     {
-        return $this->delBase('routers.router', $uuid);
+        $result = $this->delBase('routers.router', $uuid);
+        Logger::info('ui.router.delete', [
+            'uuid' => (string)$uuid,
+            'result' => $result['result'] ?? null,
+        ]);
+        return $result;
     }
 
     public function getSshPublicKeyAction()

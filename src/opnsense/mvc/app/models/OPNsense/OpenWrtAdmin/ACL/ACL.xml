@@ -4,6 +4,8 @@
         <patterns>
             <pattern>ui/openwrtadmin/*</pattern>
             <pattern>api/openwrtadmin/*</pattern>
+            <pattern>ui/diagnostics/log/core/openwrtadmin/*</pattern>
+            <pattern>api/diagnostics/log/core/openwrtadmin/*</pattern>
         </patterns>
     </page-services-openwrtadmin>
 </acl>

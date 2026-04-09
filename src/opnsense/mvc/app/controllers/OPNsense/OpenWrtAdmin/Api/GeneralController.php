@@ -10,6 +10,7 @@ namespace OPNsense\OpenWrtAdmin\Api;
 
 use OPNsense\Base\ApiMutableModelControllerBase;
 use OPNsense\Core\Config;
+use OPNsense\OpenWrtAdmin\Logger;
 use OPNsense\OpenWrtAdmin\OpenWrtAdmin;
 use OPNsense\OpenWrtAdmin\SshKeyStore;
 
@@ -32,9 +33,16 @@ class GeneralController extends ApiMutableModelControllerBase
             $mdl->settings->setNodes($this->request->getPost('settings'));
             $result = $this->validate($mdl->settings, 'settings');
             if (empty($result['result'])) {
-                return $this->save(false, true);
+                $saveResult = $this->save(false, true);
+                Logger::info('ui.settings.save', [
+                    'result' => $saveResult['result'] ?? null,
+                ]);
+                return $saveResult;
             }
         }
+        Logger::warning('ui.settings.save_failed', [
+            'result' => $result['result'] ?? null,
+        ]);
         return $result;
     }
 
@@ -60,6 +68,7 @@ class GeneralController extends ApiMutableModelControllerBase
 
         $base = tempnam('/tmp', 'openwrtadmin_key_');
         if ($base === false) {
+            Logger::error('ui.keypair.generate_failed', ['reason' => 'tempnam_failed']);
             return ['result' => 'failed', 'message' => 'Unable to allocate temporary key path.'];
         }
         @unlink($base);
@@ -75,6 +84,7 @@ class GeneralController extends ApiMutableModelControllerBase
         if ($returnCode !== 0 || !is_file($base) || !is_file($base . '.pub')) {
             @unlink($base);
             @unlink($base . '.pub');
+            Logger::error('ui.keypair.generate_failed', ['reason' => 'ssh_keygen_failed', 'return_code' => $returnCode]);
             return ['result' => 'failed', 'message' => 'Failed to generate SSH keypair.'];
         }
 
@@ -88,12 +98,18 @@ class GeneralController extends ApiMutableModelControllerBase
 
         $result = $this->validate($mdl->settings, 'settings');
         if (!empty($result['result'])) {
+            Logger::warning('ui.keypair.generate_failed', ['reason' => 'validation_failed', 'result' => $result['result'] ?? null]);
             return $result;
         }
 
         $saveResult = $this->save(false, true);
         $saveResult['ssh_key_ref'] = SshKeyStore::MANAGED_KEY_REF;
         $saveResult['public_key'] = $publicKey;
+        Logger::info('ui.keypair.generated', [
+            'result' => $saveResult['result'] ?? null,
+            'ssh_key_ref' => SshKeyStore::MANAGED_KEY_REF,
+            'comment' => $comment,
+        ]);
         return $saveResult;
     }
 }
