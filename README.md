@@ -2,15 +2,6 @@
 
 OPNsense plugin for managing a fleet of OpenWrt access points and routers from a central firewall UI.
 
-## Upstreaming notes
-
-This repository is intended to track an OPNsense plugin package suitable for submission to the official `opnsense/plugins` repository.
-
-- License: BSD-2-Clause
-- Runtime model: PHP MVC/UI + Python 3 stdlib broker + system SSH client
-- No precompiled binaries are shipped
-- The plugin should be proposed upstream via an issue first, then a pull request against `opnsense/plugins`
-
 ## Features
 
 - **Router inventory** — register OpenWrt routers by address, with live status polling (load, uptime, memory, firmware version, hardware model)
@@ -19,6 +10,40 @@ This repository is intended to track an OPNsense plugin package suitable for sub
 - **Config backups** — the broker keeps a rolling history of each config type per router; backups can be restored from the UI
 - **Bulk actions** — reboot, enable/disable Wi-Fi radios, or sync configs on multiple selected routers at once
 - **Managed SSH keypair** — generate a dedicated ed25519 keypair stored in the plugin config; or use any existing system key
+
+## Screenshots
+
+The plugin is built around day-to-day fleet operations: quick status overview, client visibility, targeted configuration management, and auditable backend activity.
+
+### Dashboard
+
+Live fleet overview with router health, hardware, channel selection, radio-level client distribution, signal quality, and sampled bandwidth.
+
+![Dashboard overview](img/scrn-01-dashboard.png)
+
+### Client Stats
+
+Cross-AP client view with inferred hostname and IP address from DHCP data, plus AP association, signal strength, and traffic counters.
+
+![Client stats page](img/scrn-02-clients.png)
+
+### Routers
+
+Inventory and operations view for selecting routers, checking sync state, and triggering bulk actions such as config sync, roaming baseline rollout, reboot, or system updates.
+
+![Routers list with bulk actions](img/scrn-03-routers.png)
+
+### Router Config
+
+Per-router configuration screen with SSH key selection, config parent relationships, and restore controls for stored config backups.
+
+![Router configuration modal](img/scrn-04-router-config.png)
+
+### Logging
+
+Dedicated plugin log output for broker lifecycle events, UI-triggered actions, config syncs, and Wi-Fi client movement between access points.
+
+![Plugin log view](img/scrn-05-logs.png)
 
 ## Architecture
 
