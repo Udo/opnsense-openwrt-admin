@@ -12,6 +12,9 @@ class Logger
 {
     private const IDENT = 'openwrtadmin';
 
+    /** Whether openlog() has already been called for this process. */
+    private static bool $opened = false;
+
     public static function info(string $event, array $context = []): void
     {
         self::write(LOG_INFO, $event, $context);
@@ -39,8 +42,11 @@ class Logger
             $message = sprintf('{"event":"%s"}', addslashes($event));
         }
 
-        openlog(self::IDENT, LOG_PID, LOG_USER);
+        if (!self::$opened) {
+            openlog(self::IDENT, LOG_PID, LOG_USER);
+            self::$opened = true;
+        }
+
         syslog($priority, $message);
-        closelog();
     }
 }

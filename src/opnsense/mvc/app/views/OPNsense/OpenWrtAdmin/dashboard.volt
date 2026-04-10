@@ -5,7 +5,7 @@
         var tbody = $("#openwrtAdminDashboardRows");
         var statusLine = $("#openwrtAdminDashboardStatus");
         var brokerBanner = "#openwrtAdminDashboardBrokerBanner";
-        var dhcpDescriptionsByAddress = JSON.parse({{ dhcpDescriptionsByAddressJson|json_encode }});
+        var dhcpDescriptionsByAddress = {{ dhcpDescriptionsByAddress|json_encode }};
 
         function formatLoad(value) {
             return value === null || value === undefined ? "n/a" : Number(value).toFixed(2);

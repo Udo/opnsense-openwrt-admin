@@ -11,6 +11,7 @@ namespace OPNsense\OpenWrtAdmin\Api;
 use OPNsense\Base\ApiControllerBase;
 use OPNsense\Core\Backend;
 use OPNsense\OpenWrtAdmin\BrokerClient;
+use OPNsense\OpenWrtAdmin\DhcpHelper;
 use OPNsense\OpenWrtAdmin\Logger;
 
 class ServiceController extends ApiControllerBase
@@ -97,54 +98,31 @@ class ServiceController extends ApiControllerBase
             return $this->dhcpHints;
         }
 
+        // Start from active DHCP leases, then layer in static-map data from config.xml.
+        // Lease-derived values take priority for hostname; config-derived values take priority
+        // for description.  The first value seen for each field wins within each source.
         $maps = $this->parseDhcpLeaseHints();
-        $configPath = '/conf/config.xml';
-        if (!is_file($configPath) || !is_readable($configPath)) {
-            $this->dhcpHints = $maps;
-            return $maps;
-        }
 
-        libxml_use_internal_errors(true);
-        $config = simplexml_load_file($configPath);
-        if ($config === false || !isset($config->dhcpd)) {
-            $this->dhcpHints = $maps;
-            return $maps;
-        }
-
-        foreach ($config->dhcpd->children() as $interfaceNode) {
-            foreach ($interfaceNode->staticmap as $staticmap) {
-                $entry = [
-                    'hostname' => trim((string)$staticmap->hostname),
-                    'description' => trim((string)$staticmap->descr),
-                    'ip_address' => trim((string)$staticmap->ipaddr),
+        foreach (DhcpHelper::staticMapsByMac() as $mac => $entry) {
+            if ($mac !== '') {
+                $existing = $maps['by_mac'][$mac] ?? ['hostname' => '', 'description' => '', 'ip_address' => ''];
+                $maps['by_mac'][$mac] = [
+                    'hostname'    => $existing['hostname']    !== '' ? $existing['hostname']    : $entry['hostname'],
+                    'description' => $entry['description']    !== '' ? $entry['description']    : $existing['description'],
+                    'ip_address'  => $existing['ip_address']  !== '' ? $existing['ip_address']  : $entry['ip_address'],
                 ];
-                $mac = strtolower(trim((string)$staticmap->mac));
-                if ($mac !== '') {
-                    $existing = $maps['by_mac'][$mac] ?? [
-                        'hostname' => '',
-                        'description' => '',
-                        'ip_address' => '',
-                    ];
-                    $maps['by_mac'][$mac] = [
-                        'hostname' => $existing['hostname'] !== '' ? $existing['hostname'] : $entry['hostname'],
-                        'description' => $entry['description'] !== '' ? $entry['description'] : $existing['description'],
-                        'ip_address' => $existing['ip_address'] !== '' ? $existing['ip_address'] : $entry['ip_address'],
-                    ];
-                }
+            }
 
-                $address = strtolower($entry['ip_address']);
-                if ($address !== '') {
-                    $existing = $maps['by_address'][$address] ?? [
-                        'hostname' => '',
-                        'description' => '',
-                        'ip_address' => $entry['ip_address'],
-                    ];
-                    $maps['by_address'][$address] = [
-                        'hostname' => $existing['hostname'] !== '' ? $existing['hostname'] : $entry['hostname'],
-                        'description' => $entry['description'] !== '' ? $entry['description'] : $existing['description'],
-                        'ip_address' => $entry['ip_address'],
-                    ];
-                }
+            $address = strtolower($entry['ip_address']);
+            if ($address !== '') {
+                $existing = $maps['by_address'][$address] ?? [
+                    'hostname' => '', 'description' => '', 'ip_address' => $entry['ip_address'],
+                ];
+                $maps['by_address'][$address] = [
+                    'hostname'    => $existing['hostname']    !== '' ? $existing['hostname']    : $entry['hostname'],
+                    'description' => $entry['description']    !== '' ? $entry['description']    : $existing['description'],
+                    'ip_address'  => $entry['ip_address'],
+                ];
             }
         }
 

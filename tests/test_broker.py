@@ -21,14 +21,12 @@ class BrokerStateTestCase(unittest.TestCase):
         self.module = load_broker_module()
         self.tempdir = tempfile.TemporaryDirectory()
         base = Path(self.tempdir.name)
-        self.module.DATA_DIR = base / "data"
-        self.module.DB_PATH = self.module.DATA_DIR / "state.sqlite"
-        self.module.KEY_DIR = self.module.DATA_DIR / "keys"
-        self.module.CONTROL_SOCKET_DIR = self.module.DATA_DIR / "control"
-        self.module.KNOWN_HOSTS_PATH = self.module.DATA_DIR / "known_hosts"
-        self.module.CONFIG_XML_PATH = base / "config.xml"
-        self.module.CONFIG_XML_PATH.write_text("<config/>", encoding="utf-8")
-        self.state = self.module.BrokerState()
+        config_xml = base / "config.xml"
+        config_xml.write_text("<config/>", encoding="utf-8")
+        self.state = self.module.BrokerState(
+            data_dir=base / "data",
+            config_xml_path=config_xml,
+        )
 
     def tearDown(self):
         self.state.close()

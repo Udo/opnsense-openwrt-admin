@@ -10,6 +10,7 @@ namespace OPNsense\OpenWrtAdmin\Api;
 
 use OPNsense\Base\ApiMutableModelControllerBase;
 use OPNsense\OpenWrtAdmin\BrokerClient;
+use OPNsense\OpenWrtAdmin\DhcpHelper;
 use OPNsense\OpenWrtAdmin\Logger;
 use OPNsense\OpenWrtAdmin\SshKeyStore;
 
@@ -39,8 +40,6 @@ class SettingsController extends ApiMutableModelControllerBase
             'hash' => 'rpcd_content_hash',
         ],
     ];
-    private ?array $dhcpDescriptionsByAddress = null;
-
     private function formatGridStatus(?string $status): string
     {
         $status = trim((string)$status);
@@ -112,47 +111,13 @@ class SettingsController extends ApiMutableModelControllerBase
         ];
     }
 
-    private function getDhcpDescriptionsByAddress(): array
-    {
-        if ($this->dhcpDescriptionsByAddress !== null) {
-            return $this->dhcpDescriptionsByAddress;
-        }
-
-        $descriptions = [];
-        $configPath = '/conf/config.xml';
-        if (!is_file($configPath) || !is_readable($configPath)) {
-            $this->dhcpDescriptionsByAddress = $descriptions;
-            return $descriptions;
-        }
-
-        libxml_use_internal_errors(true);
-        $config = simplexml_load_file($configPath);
-        if ($config === false || !isset($config->dhcpd)) {
-            $this->dhcpDescriptionsByAddress = $descriptions;
-            return $descriptions;
-        }
-
-        foreach ($config->dhcpd->children() as $interfaceNode) {
-            foreach ($interfaceNode->staticmap as $staticmap) {
-                $address = trim((string)$staticmap->ipaddr);
-                $description = trim((string)$staticmap->descr);
-                if ($address !== '' && $description !== '' && !isset($descriptions[strtolower($address)])) {
-                    $descriptions[strtolower($address)] = $description;
-                }
-            }
-        }
-
-        $this->dhcpDescriptionsByAddress = $descriptions;
-        return $descriptions;
-    }
-
     public function searchRouterAction()
     {
         $result = $this->searchBase('routers.router', null, 'address');
         $runtimeRowsByUuid = [];
         $runtimeRowsByAddress = [];
         $rowsByUuid = [];
-        $dhcpDescriptionsByAddress = $this->getDhcpDescriptionsByAddress();
+        $dhcpDescriptionsByAddress = DhcpHelper::descriptionsByAddress();
         $runtime = (new BrokerClient())->routers();
         if (!empty($runtime['ok']) && !empty($runtime['body']['routers']) && is_array($runtime['body']['routers'])) {
             foreach ($runtime['body']['routers'] as $row) {

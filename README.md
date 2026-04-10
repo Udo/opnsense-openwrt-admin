@@ -14,8 +14,6 @@ OPNsense plugin for managing a fleet of OpenWrt access points and routers from a
 
 ## Screenshots
 
-The plugin is built around day-to-day fleet operations: quick status overview, client visibility, targeted configuration management, and auditable backend activity.
-
 ### Dashboard
 
 Live fleet overview with router health, hardware, channel selection, radio-level client distribution, signal quality, and sampled bandwidth.
@@ -60,8 +58,6 @@ The **broker** (`broker.py`) is a long-running Python daemon that:
 - Stores live state and config backups in a local SQLite database (`/var/db/openwrt-admin/state.sqlite`)
 - Exposes a localhost-only HTTP API on `127.0.0.1:9783`
 
-The **PHP layer** talks to the broker via `BrokerClient`, which falls back from cURL to PHP stream contexts if cURL is unavailable.
-
 ## Requirements
 
 On **OPNsense**:
@@ -79,18 +75,15 @@ On each **OpenWrt router**:
 
 ### SSH host key trust on first connect
 
-The broker uses `StrictHostKeyChecking=accept-new`, which automatically accepts and persists a router's host key the first time it connects. This is convenient but means a man-in-the-middle attacker present at initial enrollment will be permanently trusted. For production deployments:
-
-- Enroll routers only from a network segment you control
-- After first contact, verify the stored fingerprints in `/var/db/openwrt-admin/known_hosts` against the router's own `/etc/dropbear/dropbear_ed25519_host_key` fingerprint
+The broker uses `StrictHostKeyChecking=accept-new`, which automatically accepts and persists a router's host key the first time it connects. This is convenient but means a man-in-the-middle attacker present at initial enrollment will be permanently trusted. 
 
 ### Private key storage
 
-The plugin-managed SSH private key is stored as plain text in `/conf/config.xml` and is included in any OPNsense configuration backup. Protect configuration backups accordingly.
+The plugin-managed SSH private key is stored as plain text in `/conf/config.xml` and is included in any OPNsense configuration backup.
 
 ### Broker HTTP API
 
-The broker listens on `127.0.0.1:9783` with no authentication. Any local process on the firewall can trigger polls or router actions. The attack surface is limited to privileged local processes, but be aware that a compromised plugin running on the same machine could interact with the broker.
+The broker listens on `127.0.0.1:9783` with no authentication. Any local process on the firewall can trigger polls or router actions. The attack surface is limited to privileged local processes, but a compromised plugin running on the same machine could interact with the broker.
 
 ## Installation
 
@@ -127,8 +120,6 @@ For local development, `scripts/deploy-dev.sh` can be used to copy files to a ta
 scripts/deploy-dev.sh my-opnsense-host
 ```
 
-If you use SSHFS mounts, the script will prefer `${MOUNT_BASE:-/root/mount_ssh}/<target-host>` automatically. Otherwise it falls back to SSH/SCP deployment.
-
 ## Configuration
 
 All settings are under **Services → OpenWrt Admin → Settings**:
@@ -159,10 +150,6 @@ make test
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-## Submission checklist
+# AI Disclosure
 
-- Open an issue in `opnsense/plugins` first to discuss the plugin scope
-- Import the plugin under an appropriate category directory in that repository
-- Keep the code BSD-2-Clause licensed
-- Avoid precompiled binaries and undisclosed bundled dependencies
-- Disclose AI assistance in the pull request, as requested by OPNsense
+Codex 5.4 was used for this project, mainly for OPNSense plugin platform compliance, the implementation of test cases, and general code review. Git commit messages were summarized using VSCode's git commit message summary tool.

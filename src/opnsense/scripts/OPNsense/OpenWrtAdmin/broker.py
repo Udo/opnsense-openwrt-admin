@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import signal
 import sqlite3
 import subprocess
@@ -21,14 +22,14 @@ from pathlib import Path
 
 BROKER_HOST = "127.0.0.1"
 BROKER_PORT = 9783
+
+# Default paths — overridden via BrokerState constructor in tests.
 DATA_DIR = Path("/var/db/openwrt-admin")
-DB_PATH = DATA_DIR / "state.sqlite"
-KEY_DIR = DATA_DIR / "keys"
-CONTROL_SOCKET_DIR = DATA_DIR / "control"
-KNOWN_HOSTS_PATH = DATA_DIR / "known_hosts"
 CONFIG_XML_PATH = Path("/conf/config.xml")
+
 LOG_PREFIX = "[openwrt-admind]"
-# Defaults — all overridden at runtime by values in config.xml settings.
+
+# Tunable defaults — all overridden at runtime by values in config.xml settings.
 DEFAULT_POLL_INTERVAL_SECONDS = 60
 DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS = 5
 DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS = 15
@@ -36,14 +37,23 @@ SSH_CONTROL_PERSIST_SECONDS = 120
 DEFAULT_MAX_PARALLEL_POLLS = 8
 DEFAULT_CONFIG_BACKUP_LIMIT = 8
 DEFAULT_STATS_RETENTION_DAYS = 90
+
+# How long to wait after pushing a Wi-Fi config before checking radio state.
+WIFI_RELOAD_WAIT_SECONDS = 2
+
 MANAGED_KEY_REF = "managed:openwrt-admin"
-MANAGED_KEY_PATH = KEY_DIR / "managed_ed25519"
 WIRELESS_CONFIG_PATH = "/etc/config/wireless"
 SYSTEM_CONFIG_PATH = "/etc/config/system"
 FIREWALL_CONFIG_PATH = "/etc/config/firewall"
 DHCP_CONFIG_PATH = "/etc/config/dhcp"
 RPCD_CONFIG_PATH = "/etc/config/rpcd"
 CONFIG_TYPES = ("wifi", "system", "firewall", "dhcp", "rpcd")
+
+# Pre-compiled regex for basic MAC address validation (colon-separated lowercase).
+_MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
+
+# Open syslog once for the lifetime of this process; all log calls use it directly.
+syslog.openlog("openwrtadmin", syslog.LOG_PID, syslog.LOG_USER)
 
 
 def now_iso():
@@ -139,7 +149,6 @@ def log_event(priority, event, **fields):
     payload = {"event": event}
     if fields:
         payload["context"] = fields
-    syslog.openlog("openwrtadmin", syslog.LOG_PID, syslog.LOG_USER)
     syslog.syslog(priority, compact_json(payload))
 
 
@@ -155,9 +164,16 @@ def log_exception(event, exc):
 
 
 def normalize_mac(value):
+    """Normalise a MAC address string to colon-separated lowercase.
+
+    Returns an empty string if the value is not a valid 48-bit MAC address.
+    Accepts both colon-separated and hyphen-separated formats.
+    """
     if not isinstance(value, str):
         return ""
     cleaned = value.strip().lower().replace("-", ":")
+    if not _MAC_RE.match(cleaned):
+        return ""
     return cleaned
 
 
@@ -181,7 +197,18 @@ def router_label(router):
 
 
 class BrokerState:
-    def __init__(self):
+    def __init__(self, data_dir=None, config_xml_path=None):
+        # Path configuration — callers may override for testing.
+        self._data_dir = Path(data_dir) if data_dir is not None else DATA_DIR
+        self._config_xml_path = Path(config_xml_path) if config_xml_path is not None else CONFIG_XML_PATH
+
+        # Derived paths kept as instance attributes so every method uses the same root.
+        self._db_path = self._data_dir / "state.sqlite"
+        self._key_dir = self._data_dir / "keys"
+        self._control_socket_dir = self._data_dir / "control"
+        self._known_hosts_path = self._data_dir / "known_hosts"
+        self._managed_key_path = self._data_dir / "keys" / "managed_ed25519"
+
         self.lock = threading.Lock()
         self.shutdown_event = threading.Event()
         self.current_poll = None
@@ -220,15 +247,17 @@ class BrokerState:
             self._stats_retention_days = DEFAULT_STATS_RETENTION_DAYS
 
     def _ensure_paths(self):
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        KEY_DIR.mkdir(parents=True, exist_ok=True)
-        CONTROL_SOCKET_DIR.mkdir(parents=True, exist_ok=True)
-        os.chmod(CONTROL_SOCKET_DIR, 0o700)
-        KNOWN_HOSTS_PATH.touch(mode=0o600, exist_ok=True)
-        os.chmod(KNOWN_HOSTS_PATH, 0o600)
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._key_dir.mkdir(parents=True, exist_ok=True)
+        self._control_socket_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self._control_socket_dir, 0o700)
+        self._known_hosts_path.touch(mode=0o600, exist_ok=True)
+        os.chmod(self._known_hosts_path, 0o600)
 
     def _db(self):
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(self._db_path)
+        # WAL mode is a database-level setting; setting it once at startup is
+        # enough, but it is idempotent so this is safe on every connection.
         conn.execute("PRAGMA journal_mode=WAL")
         conn.row_factory = sqlite3.Row
         return conn
@@ -239,11 +268,26 @@ class BrokerState:
         try:
             yield conn
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
     def _init_db(self):
+        """Create tables and run any pending column migrations.
+
+        Schema design note:
+        - CREATE TABLE IF NOT EXISTS defines the *target* schema for new installations.
+        - Each _add_column_if_missing() call is a *migration* guard: it adds the column
+          on existing databases that predate the column's introduction.  Columns that
+          appear in both places are intentional — the CREATE TABLE handles fresh installs
+          while the migration handles upgrades.
+        """
         with self._db_context() as conn:
+            # ------------------------------------------------------------------ #
+            # router_status — one row per configured router, updated every poll. #
+            # ------------------------------------------------------------------ #
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS router_status (
@@ -276,41 +320,31 @@ class BrokerState:
                 )
                 """
             )
-            self._ensure_column(conn, "router_status", "load_1m", "REAL")
-            self._ensure_column(conn, "router_status", "uptime_seconds", "INTEGER")
-            self._ensure_column(conn, "router_status", "memory_used_pct", "INTEGER")
-            self._ensure_column(conn, "router_status", "wifi_clients", "INTEGER")
-            self._ensure_column(conn, "router_status", "wifi_clients_by_radio", "TEXT")
-            self._ensure_column(conn, "router_status", "wifi_clients_by_network", "TEXT")
-            self._ensure_column(conn, "router_status", "radio_channels", "TEXT")
-            self._ensure_column(conn, "router_status", "hardware_model", "TEXT")
-            self._ensure_column(conn, "router_status", "best_signal_dbm", "INTEGER")
-            self._ensure_column(conn, "router_status", "worst_signal_dbm", "INTEGER")
-            self._ensure_column(conn, "router_status", "signal_histogram", "TEXT")
-            self._ensure_column(conn, "router_status", "rx_bps", "INTEGER")
-            self._ensure_column(conn, "router_status", "tx_bps", "INTEGER")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS router_wireless_state (
-                    router_uuid TEXT PRIMARY KEY,
-                    content_hash TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    fetched_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS router_wireless_backup (
-                    router_uuid TEXT NOT NULL,
-                    content_hash TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL,
-                    PRIMARY KEY (router_uuid, content_hash)
-                )
-                """
-            )
+            # Migrations: columns added after initial release.
+            self._add_column_if_missing(conn, "router_status", "load_1m", "REAL")
+            self._add_column_if_missing(conn, "router_status", "uptime_seconds", "INTEGER")
+            self._add_column_if_missing(conn, "router_status", "memory_used_pct", "INTEGER")
+            self._add_column_if_missing(conn, "router_status", "wifi_clients", "INTEGER")
+            self._add_column_if_missing(conn, "router_status", "wifi_clients_by_radio", "TEXT")
+            self._add_column_if_missing(conn, "router_status", "wifi_clients_by_network", "TEXT")
+            self._add_column_if_missing(conn, "router_status", "radio_channels", "TEXT")
+            self._add_column_if_missing(conn, "router_status", "hardware_model", "TEXT")
+            self._add_column_if_missing(conn, "router_status", "best_signal_dbm", "INTEGER")
+            self._add_column_if_missing(conn, "router_status", "worst_signal_dbm", "INTEGER")
+            self._add_column_if_missing(conn, "router_status", "signal_histogram", "TEXT")
+            self._add_column_if_missing(conn, "router_status", "rx_bps", "INTEGER")
+            self._add_column_if_missing(conn, "router_status", "tx_bps", "INTEGER")
+
+            # ------------------------------------------------------------------ #
+            # Superseded tables — drop them on existing installations to reclaim  #
+            # space.  These were replaced by router_config_state/backup.          #
+            # ------------------------------------------------------------------ #
+            conn.execute("DROP TABLE IF EXISTS router_wireless_state")
+            conn.execute("DROP TABLE IF EXISTS router_wireless_backup")
+
+            # ------------------------------------------------------------------ #
+            # router_config_state — latest fetched config per (router, type).    #
+            # ------------------------------------------------------------------ #
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS router_config_state (
@@ -323,6 +357,10 @@ class BrokerState:
                 )
                 """
             )
+
+            # ------------------------------------------------------------------ #
+            # router_config_backup — historical config snapshots (bounded).       #
+            # ------------------------------------------------------------------ #
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS router_config_backup (
@@ -336,6 +374,10 @@ class BrokerState:
                 )
                 """
             )
+
+            # ------------------------------------------------------------------ #
+            # router_client_status — current Wi-Fi client associations.          #
+            # ------------------------------------------------------------------ #
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS router_client_status (
@@ -355,9 +397,14 @@ class BrokerState:
                 )
                 """
             )
-            self._ensure_column(conn, "router_client_status", "ip_address", "TEXT")
-            self._ensure_column(conn, "router_client_status", "rx_bps", "INTEGER")
-            self._ensure_column(conn, "router_client_status", "tx_bps", "INTEGER")
+            # Migrations.
+            self._add_column_if_missing(conn, "router_client_status", "ip_address", "TEXT")
+            self._add_column_if_missing(conn, "router_client_status", "rx_bps", "INTEGER")
+            self._add_column_if_missing(conn, "router_client_status", "tx_bps", "INTEGER")
+
+            # ------------------------------------------------------------------ #
+            # router_network_hourly_stats — hourly aggregates for the Stats UI.  #
+            # ------------------------------------------------------------------ #
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS router_network_hourly_stats (
@@ -375,20 +422,27 @@ class BrokerState:
                 )
                 """
             )
-            self._ensure_column(conn, "router_network_hourly_stats", "sample_count", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(conn, "router_network_hourly_stats", "client_count_sum", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(conn, "router_network_hourly_stats", "signal_sum", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(conn, "router_network_hourly_stats", "signal_sample_count", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(conn, "router_network_hourly_stats", "best_signal_dbm", "INTEGER")
-            self._ensure_column(conn, "router_network_hourly_stats", "worst_signal_dbm", "INTEGER")
+            # Migrations.
+            self._add_column_if_missing(conn, "router_network_hourly_stats", "sample_count", "INTEGER NOT NULL DEFAULT 0")
+            self._add_column_if_missing(conn, "router_network_hourly_stats", "client_count_sum", "INTEGER NOT NULL DEFAULT 0")
+            self._add_column_if_missing(conn, "router_network_hourly_stats", "signal_sum", "INTEGER NOT NULL DEFAULT 0")
+            self._add_column_if_missing(conn, "router_network_hourly_stats", "signal_sample_count", "INTEGER NOT NULL DEFAULT 0")
+            self._add_column_if_missing(conn, "router_network_hourly_stats", "best_signal_dbm", "INTEGER")
+            self._add_column_if_missing(conn, "router_network_hourly_stats", "worst_signal_dbm", "INTEGER")
 
-    def _ensure_column(self, conn, table_name, column_name, definition):
-        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
-        if column_name not in columns:
+    def _add_column_if_missing(self, conn, table_name, column_name, definition):
+        """Add *column_name* to *table_name* if it does not already exist.
+
+        This is a lightweight schema-migration helper.  table_name and
+        column_name are always caller-controlled string literals, never
+        user-supplied values.
+        """
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+        if column_name not in existing:
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
     def load_config(self):
-        tree = ET.parse(CONFIG_XML_PATH)
+        tree = ET.parse(self._config_xml_path)
         root = tree.getroot()
         opnsense = root.find("./OPNsense")
         app = opnsense.find("./OpenWrtAdmin") if opnsense is not None else None
@@ -441,9 +495,9 @@ class BrokerState:
         if not private_key:
             return None
 
-        MANAGED_KEY_PATH.write_text(private_key + "\n", encoding="utf-8")
-        os.chmod(MANAGED_KEY_PATH, 0o600)
-        return str(MANAGED_KEY_PATH)
+        self._managed_key_path.write_text(private_key + "\n", encoding="utf-8")
+        os.chmod(self._managed_key_path, 0o600)
+        return str(self._managed_key_path)
 
     def resolve_private_key(self, ssh_key_ref, settings):
         if ssh_key_ref == MANAGED_KEY_REF:
@@ -739,9 +793,14 @@ class BrokerState:
 
     def control_socket_path(self, address, private_key, username="root"):
         digest = hashlib.sha1(f"{username}@{address}|{private_key}".encode("utf-8")).hexdigest()[:20]
-        return CONTROL_SOCKET_DIR / f"cm-{digest}"
+        return self._control_socket_dir / f"cm-{digest}"
 
     def ssh_base_command(self, address, private_key, control_path, username="root"):
+        # StrictHostKeyChecking=accept-new implements a TOFU (trust-on-first-use) model.
+        # New host keys are accepted silently; changed keys are rejected.  This is a
+        # deliberate design choice for managed AP fleets where physical access controls
+        # the risk.  Operators who require strict verification should pre-populate the
+        # known_hosts file.
         return [
             "ssh",
             "-i",
@@ -765,7 +824,7 @@ class BrokerState:
             "-o",
             "ServerAliveCountMax=1",
             "-o",
-            f"UserKnownHostsFile={KNOWN_HOSTS_PATH}",
+            f"UserKnownHostsFile={self._known_hosts_path}",
             "-o",
             "StrictHostKeyChecking=accept-new",
             "-o",
@@ -1351,49 +1410,58 @@ set -eu
 stamp="$(date +%Y%m%d-%H%M%S)"
 cp /etc/config/wireless "/etc/config/wireless.pre-openwrt-admin-$stamp"
 [ -f /etc/config/usteer ] && cp /etc/config/usteer "/etc/config/usteer.pre-openwrt-admin-$stamp" || true
+
 if ! command -v usteerd >/dev/null 2>&1; then
   apk update >/tmp/apk-update.log 2>&1
   apk add usteer >/tmp/apk-add-usteer.log 2>&1
 fi
+
 if ! uci -q get usteer.@usteer[0] >/dev/null 2>&1; then
   uci add usteer usteer >/dev/null
 fi
-uci batch <<'UCI'
-set wireless.radio0.channel='auto'
-set wireless.radio1.channel='auto'
-set wireless.wifinet0.ieee80211r='1'
-set wireless.wifinet1.ieee80211r='1'
-set wireless.wifinet0.ieee80211k='1'
-set wireless.wifinet1.ieee80211k='1'
-set wireless.wifinet0.ft_over_ds='0'
-set wireless.wifinet1.ft_over_ds='0'
-set wireless.wifinet0.bss_transition='1'
-set wireless.wifinet1.bss_transition='1'
-set wireless.wifinet0.wnm_sleep_mode='1'
-set wireless.wifinet1.wnm_sleep_mode='1'
-set wireless.wifinet0.wnm_sleep_mode_no_keys='1'
-set wireless.wifinet1.wnm_sleep_mode_no_keys='1'
-set usteer.@usteer[0].network='lan'
-set usteer.@usteer[0].syslog='1'
-set usteer.@usteer[0].local_mode='0'
-set usteer.@usteer[0].ipv6='0'
-set usteer.@usteer[0].debug_level='2'
-set usteer.@usteer[0].assoc_steering='1'
-set usteer.@usteer[0].probe_steering='1'
-set usteer.@usteer[0].load_balancing_threshold='2'
-set usteer.@usteer[0].signal_diff_threshold='8'
-set usteer.@usteer[0].band_steering_interval='120000'
-set usteer.@usteer[0].band_steering_min_snr='-60'
-set usteer.@usteer[0].roam_scan_snr='-70'
-set usteer.@usteer[0].roam_scan_tries='3'
-set usteer.@usteer[0].roam_scan_interval='10000'
-set usteer.@usteer[0].roam_trigger_snr='-75'
-set usteer.@usteer[0].roam_trigger_interval='60000'
-set usteer.@usteer[0].link_measurement_interval='30000'
-del usteer.@usteer[0].ssid_list
-for section in $(uci show wireless | sed -n "s/^wireless\\.\\([^=]*\\)=wifi-iface$/\\1/p"); do
-    mode=$(uci -q get wireless.${section}.mode || true)
-    ssid=$(uci -q get wireless.${section}.ssid || true)
+
+# Set channel=auto on every Wi-Fi radio device (works regardless of naming convention).
+for radio in $(uci show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-device$/\1/p'); do
+    uci set wireless."${radio}".channel='auto'
+done
+
+# Enable 802.11r/k/v on every AP interface (works regardless of naming convention).
+for section in $(uci show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+    mode=$(uci -q get wireless."${section}".mode || true)
+    if [ "${mode}" = "ap" ]; then
+        uci set wireless."${section}".ieee80211r='1'
+        uci set wireless."${section}".ieee80211k='1'
+        uci set wireless."${section}".ft_over_ds='0'
+        uci set wireless."${section}".bss_transition='1'
+        uci set wireless."${section}".wnm_sleep_mode='1'
+        uci set wireless."${section}".wnm_sleep_mode_no_keys='1'
+    fi
+done
+
+# Configure usteer steering parameters.
+uci set usteer.@usteer[0].network='lan'
+uci set usteer.@usteer[0].syslog='1'
+uci set usteer.@usteer[0].local_mode='0'
+uci set usteer.@usteer[0].ipv6='0'
+uci set usteer.@usteer[0].debug_level='2'
+uci set usteer.@usteer[0].assoc_steering='1'
+uci set usteer.@usteer[0].probe_steering='1'
+uci set usteer.@usteer[0].load_balancing_threshold='2'
+uci set usteer.@usteer[0].signal_diff_threshold='8'
+uci set usteer.@usteer[0].band_steering_interval='120000'
+uci set usteer.@usteer[0].band_steering_min_snr='-60'
+uci set usteer.@usteer[0].roam_scan_snr='-70'
+uci set usteer.@usteer[0].roam_scan_tries='3'
+uci set usteer.@usteer[0].roam_scan_interval='10000'
+uci set usteer.@usteer[0].roam_trigger_snr='-75'
+uci set usteer.@usteer[0].roam_trigger_interval='60000'
+uci set usteer.@usteer[0].link_measurement_interval='30000'
+
+# Rebuild usteer SSID list from all active AP interfaces.
+uci -q del usteer.@usteer[0].ssid_list || true
+for section in $(uci show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+    mode=$(uci -q get wireless."${section}".mode || true)
+    ssid=$(uci -q get wireless."${section}".ssid || true)
     if [ "${mode}" = "ap" ] && [ -n "${ssid}" ]; then
         add_list_output=$(uci add_list usteer.@usteer[0].ssid_list="${ssid}" 2>&1) || {
             echo "${add_list_output}" >&2
@@ -1401,9 +1469,9 @@ for section in $(uci show wireless | sed -n "s/^wireless\\.\\([^=]*\\)=wifi-ifac
         }
     fi
 done
-commit wireless
-commit usteer
-UCI
+
+uci commit wireless
+uci commit usteer
 wifi reload
 /etc/init.d/usteer enable
 /etc/init.d/usteer restart
@@ -1497,38 +1565,27 @@ pgrep -af usteer >/dev/null 2>&1
         }
 
     def perform_router_action(self, router, settings, action):
-        address = router["address"]
-        username = router.get("ssh_username") or "root"
-        private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
+        # apply_roaming_baseline and apply_system_update run their own precondition
+        # checks internally; dispatch to them before the generic guards below.
         if action == "apply_roaming_baseline":
             return self.apply_roaming_baseline(router, settings)
         if action == "sys_update":
             return self.apply_system_update(router, settings)
-        command = self.router_action_command(action)
+
+        router_uuid = router["router_uuid"]
+        address = router["address"]
+        username = router.get("ssh_username") or "root"
 
         if not address:
-            return {
-                "router_uuid": router["router_uuid"],
-                "address": "",
-                "ok": False,
-                "message": "Missing router address.",
-            }
+            return {"router_uuid": router_uuid, "address": "", "ok": False, "message": "Missing router address."}
 
+        private_key = self.resolve_private_key(router["ssh_key_ref"], settings)
         if not private_key:
-            return {
-                "router_uuid": router["router_uuid"],
-                "address": address,
-                "ok": False,
-                "message": "No usable SSH private key available.",
-            }
+            return {"router_uuid": router_uuid, "address": address, "ok": False, "message": "No usable SSH private key available."}
 
+        command = self.router_action_command(action)
         if command is None:
-            return {
-                "router_uuid": router["router_uuid"],
-                "address": address,
-                "ok": False,
-                "message": "Unsupported action.",
-            }
+            return {"router_uuid": router_uuid, "address": address, "ok": False, "message": "Unsupported action."}
 
         result = self.run_ssh(address, private_key, command, username=username)
         if result["timed_out"]:
@@ -1746,7 +1803,7 @@ pgrep -af usteer >/dev/null 2>&1
         if not address or not private_key:
             return {"ok": False, "message": "Router not reachable for verification."}
 
-        time.sleep(2)
+        time.sleep(WIFI_RELOAD_WAIT_SECONDS)
         result = self.run_ssh(address, private_key, ["ubus", "call", "network.wireless", "status"], username=username)
         if result["timed_out"]:
             return {"ok": False, "message": "Timed out waiting for Wi-Fi status."}
@@ -2030,19 +2087,27 @@ pgrep -af usteer >/dev/null 2>&1
         changed = 0
         successful = 0
         failed = 0
+        # matched is the number of requested UUIDs that exist in the current config.
+        # All config types operate on the same router set so the value is the same
+        # across calls; capture it from the first successful result.
+        matched = None
         for config_type in CONFIG_TYPES:
             result = self.sync_configs_by_type(router_uuids, config_type)
             if result.get("status") != "ok":
                 return result
+            if matched is None:
+                matched = result.get("matched", len(router_uuids))
             all_results.extend(result["results"])
             changed += result.get("changed", 0)
             successful += result.get("successful", 0)
             failed += result.get("failed", 0)
+
+        matched = matched if matched is not None else len(router_uuids)
         response = {
             "status": "ok",
             "action": "sync_configs",
             "requested": len(router_uuids),
-            "matched": len(router_uuids),
+            "matched": matched,
             "successful": successful,
             "failed": failed,
             "changed": changed,
@@ -2052,7 +2117,7 @@ pgrep -af usteer >/dev/null 2>&1
             syslog.LOG_INFO,
             "broker.config_sync.all_summary",
             requested=len(router_uuids),
-            matched=len(router_uuids),
+            matched=matched,
             successful=successful,
             failed=failed,
             changed=changed,
