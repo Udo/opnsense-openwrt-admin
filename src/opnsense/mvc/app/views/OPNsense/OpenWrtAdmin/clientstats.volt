@@ -1,6 +1,11 @@
 {{ partial("OPNsense/OpenWrtAdmin/_js_utils") }}
 
 <style>
+    .openwrt-admin-client-summary {
+        margin-bottom: 12px;
+        color: #6b7280;
+    }
+
     .openwrt-admin-client-association {
         margin-bottom: 6px;
     }
@@ -19,6 +24,7 @@
     $(document).ready(function() {
         var tbody = $("#openwrtAdminClientStatsRows");
         var statusLine = $("#openwrtAdminClientStatsStatus");
+        var summaryLine = $("#openwrtAdminClientStatsSummary");
         var brokerBanner = "#openwrtAdminClientStatsBrokerBanner";
 
         function formatSignal(signal) {
@@ -88,8 +94,10 @@
 
         function renderRows(clients) {
             tbody.empty();
+            summaryLine.text("");
 
             if (!clients.length) {
+                summaryLine.text("{{ lang._('No clients are currently associated with any managed AP.') }}");
                 tbody.append(
                     $("<tr>").append(
                         $("<td>", {
@@ -101,6 +109,8 @@
                 );
                 return;
             }
+
+            summaryLine.text(clients.length + " {{ lang._('clients currently visible across the AP fleet.') }}");
 
             clients.forEach(function(client) {
                 var hostname = client.hostname || "---";
@@ -148,12 +158,14 @@
             <div class="alert alert-danger hidden" id="openwrtAdminClientStatsBrokerBanner"></div>
             <div class="box box-default">
                 <div class="box-header with-border">
-                    <h3 class="box-title">{{ lang._('Client Stats') }}</h3>
+                    <h3 class="box-title">{{ lang._('Clients') }}</h3>
                     <div class="box-tools pull-right">
                         <span class="text-muted" id="openwrtAdminClientStatsStatus"></span>
                     </div>
                 </div>
-                <div class="box-body table-responsive">
+                <div class="box-body">
+                    <div class="openwrt-admin-client-summary" id="openwrtAdminClientStatsSummary"></div>
+                    <div class="table-responsive">
                     <table class="table table-striped table-hover">
                         <thead>
                             <tr>
@@ -171,6 +183,7 @@
                             </tr>
                         </tbody>
                     </table>
+                    </div>
                 </div>
             </div>
         </div>

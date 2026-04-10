@@ -292,6 +292,48 @@ class ServiceController extends ApiControllerBase
         ];
     }
 
+    public function statsAction()
+    {
+        $routers = $this->request->getPost('routers');
+        if (!is_array($routers)) {
+            $routers = $this->request->getQuery('routers');
+        }
+        if (!is_array($routers)) {
+            $routers = $routers !== null ? [$routers] : [];
+        }
+
+        $networks = $this->request->getPost('networks');
+        if (!is_array($networks)) {
+            $networks = $this->request->getQuery('networks');
+        }
+        if (!is_array($networks)) {
+            $networks = $networks !== null ? [$networks] : [];
+        }
+
+        $filters = [
+            'start_at' => trim((string)($this->request->getPost('start_at') ?? $this->request->getQuery('start_at') ?? '')),
+            'end_at' => trim((string)($this->request->getPost('end_at') ?? $this->request->getQuery('end_at') ?? '')),
+            'routers' => array_values(array_filter(array_map('strval', $routers), static function (string $value): bool {
+                return trim($value) !== '';
+            })),
+            'networks' => array_values(array_filter(array_map('strval', $networks), static function (string $value): bool {
+                return trim($value) !== '';
+            })),
+        ];
+
+        $result = (new BrokerClient())->stats($filters);
+        if (!empty($result['body']) && is_array($result['body'])) {
+            return $result['body'];
+        }
+
+        Logger::warning('ui.stats.broker_failure', [
+            'http_status' => $result['status'] ?? 0,
+            'timed_out' => $result['timed_out'] ?? false,
+            'error' => $result['error'] ?? null,
+        ]);
+        return $this->brokerFailure($result, 'Broker request failed.');
+    }
+
     private const ALLOWED_BULK_ACTIONS = ['reboot', 'radios_on', 'radios_off', 'sync_configs', 'apply_roaming_baseline', 'sys_update'];
 
     public function bulkActionAction()

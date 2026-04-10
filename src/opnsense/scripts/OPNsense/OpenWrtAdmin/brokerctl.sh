@@ -5,11 +5,16 @@ set -eu
 PYTHON_BIN="/usr/local/bin/python3"
 BROKER_SCRIPT="/usr/local/opnsense/scripts/OPNsense/OpenWrtAdmin/broker.py"
 PIDFILE="/var/run/openwrt-admind.pid"
-LOGFILE="/var/log/openwrt-admind.log"
+LOGDIR="/var/log/openwrtadmin"
+LOGFILE="${LOGDIR}/daemon.log"
 API_URL="http://127.0.0.1:9783"
 
 is_running() {
     [ -f "${PIDFILE}" ] && kill -0 "$(cat "${PIDFILE}")" 2>/dev/null
+}
+
+api_reachable() {
+    curl -sf --max-time 2 "${API_URL}/v1/status" >/dev/null 2>&1
 }
 
 start_broker() {
@@ -18,10 +23,20 @@ start_broker() {
         return 0
     fi
 
-    mkdir -p /var/db/openwrt-admin /var/db/openwrt-admin/keys
+    mkdir -p /var/db/openwrt-admin /var/db/openwrt-admin/keys "${LOGDIR}"
     touch "${LOGFILE}"
     /usr/sbin/daemon -f -p "${PIDFILE}" -o "${LOGFILE}" "${PYTHON_BIN}" "${BROKER_SCRIPT}"
-    echo "started"
+    i=0
+    while [ "${i}" -lt 50 ]; do
+        if api_reachable; then
+            echo "started"
+            return 0
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    echo "failed to start" >&2
+    return 1
 }
 
 stop_broker() {
@@ -44,8 +59,10 @@ stop_broker() {
 }
 
 status_broker() {
-    if is_running; then
+    if is_running && api_reachable; then
         echo "running"
+    elif is_running; then
+        echo "degraded"
     else
         echo "stopped"
     fi

@@ -2,10 +2,11 @@
     <Services>
         <OpenWrtAdmin VisibleName="OpenWrt Admin" cssClass="fa fa-wifi fa-fw">
             <Dashboard order="10" url="/ui/openwrtadmin/dashboard"/>
-            <ClientStats VisibleName="Client Stats" order="20" url="/ui/openwrtadmin/client_stats"/>
-            <Routers order="30" url="/ui/openwrtadmin"/>
-            <Settings order="40" url="/ui/openwrtadmin/general"/>
-            <LogFile VisibleName="Log File" order="50" url="/ui/diagnostics/log/core/openwrtadmin"/>
+            <ClientStats VisibleName="Clients" order="20" url="/ui/openwrtadmin/client_stats"/>
+            <Stats order="30" url="/ui/openwrtadmin/stats"/>
+            <Routers order="40" url="/ui/openwrtadmin"/>
+            <Settings order="50" url="/ui/openwrtadmin/general"/>
+            <LogFile VisibleName="Log File" order="60" url="/ui/diagnostics/log/core/openwrtadmin"/>
         </OpenWrtAdmin>
     </Services>
 </menu>

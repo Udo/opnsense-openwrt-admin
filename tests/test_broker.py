@@ -1,6 +1,7 @@
 import importlib.util
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -287,6 +288,182 @@ class BrokerStateTestCase(unittest.TestCase):
         self.assertEqual(client_row["tx_bps"], 300)
         self.assertEqual(router_row["rx_bps"], 500)
         self.assertEqual(router_row["tx_bps"], 300)
+
+    def test_parse_network_stats_tracks_zero_client_networks_and_signal_summary(self):
+        network_stats = self.state.parse_network_stats(
+            [
+                {
+                    "radio": "phy0-ap0",
+                    "network": "TestSSID",
+                    "payload": {
+                        "clients": {
+                            "aa:bb:cc:dd:ee:ff": {"signal": -51},
+                            "11:22:33:44:55:66": {"signal": -64},
+                        }
+                    },
+                },
+                {
+                    "radio": "phy1-ap0",
+                    "network": "GuestSSID",
+                    "payload": {
+                        "clients": {}
+                    },
+                },
+            ]
+        )
+
+        self.assertEqual(network_stats[0]["network_name"], "GuestSSID")
+        self.assertEqual(network_stats[0]["client_count"], 0)
+        self.assertEqual(network_stats[1]["network_name"], "TestSSID")
+        self.assertEqual(network_stats[1]["client_count"], 2)
+        self.assertEqual(network_stats[1]["signal_sum"], -115)
+        self.assertEqual(network_stats[1]["signal_sample_count"], 2)
+        self.assertEqual(network_stats[1]["best_signal_dbm"], -51)
+        self.assertEqual(network_stats[1]["worst_signal_dbm"], -64)
+
+    def test_stats_rows_aggregate_hourly_data_across_aps(self):
+        routers = [
+            {
+                "router_uuid": "router-1",
+                "address": "192.0.2.10",
+                "hostname": "AP-1",
+                "description": "",
+                "ssh_key_ref": "system:/root/.ssh/id_ed25519.pub",
+            },
+            {
+                "router_uuid": "router-2",
+                "address": "192.0.2.11",
+                "hostname": "AP-2",
+                "description": "",
+                "ssh_key_ref": "system:/root/.ssh/id_ed25519.pub",
+            },
+        ]
+        self.state.sync_router_rows(routers)
+
+        self.state.write_poll_results(
+            routers,
+            [
+                {
+                    "router_uuid": "router-1",
+                    "reachable": 1,
+                    "status_text": "Healthy | 1m up",
+                    "version": "OpenWrt test",
+                    "hardware_model": "Test AP",
+                    "detected_hostname": "AP-1",
+                    "load_1m": 0.1,
+                    "uptime_seconds": 60,
+                    "memory_used_pct": 50,
+                    "wifi_clients": 2,
+                    "wifi_clients_by_radio": None,
+                    "wifi_clients_by_network": None,
+                    "radio_channels": None,
+                    "best_signal_dbm": -50,
+                    "worst_signal_dbm": -60,
+                    "signal_histogram": None,
+                    "latency_ms": 10,
+                    "last_seen": "2026-04-09T00:05:00+00:00",
+                    "last_error": "",
+                    "updated_at": "2026-04-09T00:05:00+00:00",
+                    "client_associations": [],
+                    "network_stats": [
+                        {
+                            "network_name": "TestSSID",
+                            "client_count": 2,
+                            "signal_sum": -110,
+                            "signal_sample_count": 2,
+                            "best_signal_dbm": -50,
+                            "worst_signal_dbm": -60,
+                        }
+                    ],
+                },
+                {
+                    "router_uuid": "router-2",
+                    "reachable": 1,
+                    "status_text": "Healthy | 1m up",
+                    "version": "OpenWrt test",
+                    "hardware_model": "Test AP",
+                    "detected_hostname": "AP-2",
+                    "load_1m": 0.1,
+                    "uptime_seconds": 60,
+                    "memory_used_pct": 50,
+                    "wifi_clients": 1,
+                    "wifi_clients_by_radio": None,
+                    "wifi_clients_by_network": None,
+                    "radio_channels": None,
+                    "best_signal_dbm": -55,
+                    "worst_signal_dbm": -55,
+                    "signal_histogram": None,
+                    "latency_ms": 10,
+                    "last_seen": "2026-04-09T00:15:00+00:00",
+                    "last_error": "",
+                    "updated_at": "2026-04-09T00:15:00+00:00",
+                    "client_associations": [],
+                    "network_stats": [
+                        {
+                            "network_name": "TestSSID",
+                            "client_count": 1,
+                            "signal_sum": -55,
+                            "signal_sample_count": 1,
+                            "best_signal_dbm": -55,
+                            "worst_signal_dbm": -55,
+                        }
+                    ],
+                },
+            ],
+        )
+
+        payload = self.state.stats_rows(
+            "2026-04-09T00:00:00+00:00",
+            "2026-04-09T01:00:00+00:00",
+            [],
+            [],
+        )
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(len(payload["rows"]), 1)
+        row = payload["rows"][0]
+        self.assertEqual(row["network_name"], "TestSSID")
+        self.assertAlmostEqual(row["avg_clients"], 1.5)
+        self.assertAlmostEqual(row["avg_signal_dbm"], -55.0)
+        self.assertEqual(row["best_signal_dbm"], -50)
+        self.assertEqual(row["worst_signal_dbm"], -60)
+
+    def test_cleanup_old_hourly_stats_respects_retention_days(self):
+        with self.state._db_context() as conn:
+            conn.execute(
+                """
+                INSERT INTO router_network_hourly_stats (
+                    router_uuid, network_name, hour_bucket, sample_count, client_count_sum,
+                    signal_sum, signal_sample_count, best_signal_dbm, worst_signal_dbm, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "router-1",
+                    "TestSSID",
+                    "2026-04-08T00:00:00+00:00",
+                    1,
+                    1,
+                    -55,
+                    1,
+                    -55,
+                    -55,
+                    "2026-04-08T00:00:00+00:00",
+                ),
+            )
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 4, 10, 0, 0, 0, tzinfo=timezone.utc)
+
+        self.state._stats_retention_days = 1
+        with mock.patch.object(self.module, "datetime", FrozenDateTime):
+            with self.state._db_context() as conn:
+                self.state.cleanup_old_hourly_stats(conn)
+
+        with self.state._db_context() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM router_network_hourly_stats").fetchone()[0]
+        self.assertEqual(count, 0)
 
 
 if __name__ == "__main__":

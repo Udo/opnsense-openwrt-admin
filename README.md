@@ -6,6 +6,7 @@ OPNsense plugin for managing a fleet of OpenWrt access points and routers from a
 
 - **Router inventory** — register OpenWrt routers by address, with live status polling (load, uptime, memory, firmware version, hardware model)
 - **Wi-Fi client visibility** — see all associated clients across all APs in one table, with signal strength, throughput, and DHCP hostname enrichment
+- **Historical stats** — graph hourly client counts and signal quality per Wi-Fi network over time, filterable by AP, network, and time window
 - **Config sync** — push a source router's `wireless`, `system`, `firewall`, `dhcp`, or `rpcd` config to other routers of the same hardware model (system hostname is always preserved on the target)
 - **Config backups** — the broker keeps a rolling history of each config type per router; backups can be restored from the UI
 - **Bulk actions** — reboot, enable/disable Wi-Fi radios, or sync configs on multiple selected routers at once
@@ -139,8 +140,9 @@ All settings are under **Services → OpenWrt Admin → Settings**:
 | SSH command timeout (s) | 15 | Timeout per SSH command |
 | Max parallel polls | 8 | How many routers are polled concurrently |
 | Config backup limit | 8 | Max historical backups per router per config type |
+| Hourly stats retention (days) | 90 | How long aggregated client-count and signal history is retained before automatic cleanup |
 
-Changes to poll interval, max parallel polls, SSH timeouts, and backup limit take effect after restarting the broker service.
+Changes to poll interval, max parallel polls, SSH timeouts, backup limit, and hourly stats retention take effect after restarting the broker service.
 
 Per-router settings (under **Services → OpenWrt Admin → Routers**):
 - **SSH username** — defaults to `root`; change if you use a dedicated SSH user

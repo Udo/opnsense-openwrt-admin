@@ -131,6 +131,11 @@ class BrokerClient
         return $this->request('GET', '/v1/clients');
     }
 
+    public function stats(array $filters): array
+    {
+        return $this->request('POST', '/v1/stats', $filters, self::ACTION_TIMEOUT);
+    }
+
     public function pollNow(): array
     {
         return $this->request('POST', '/v1/poll-now');

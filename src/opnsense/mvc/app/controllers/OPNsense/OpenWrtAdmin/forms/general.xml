@@ -47,4 +47,10 @@
         <type>text</type>
         <help>Maximum number of historical backups retained per router per config type (wifi, system, firewall, dhcp, rpcd). Oldest entries are pruned automatically. Default: 8.</help>
     </field>
+    <field>
+        <id>settings.stats_retention_days</id>
+        <label>Hourly stats retention (days)</label>
+        <type>text</type>
+        <help>How long hourly Wi-Fi client and signal history is retained before cleanup. Default: 90 days (about 3 months).</help>
+    </field>
 </form>

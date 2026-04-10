@@ -15,7 +15,8 @@ load_rc_config "${name}"
 : ${openwrtadmin_python:="/usr/local/bin/python3"}
 : ${openwrtadmin_script:="/usr/local/opnsense/scripts/OPNsense/OpenWrtAdmin/broker.py"}
 : ${openwrtadmin_pidfile:="/var/run/openwrt-admind.pid"}
-: ${openwrtadmin_logfile:="/var/log/openwrt-admind.log"}
+: ${openwrtadmin_logdir:="/var/log/openwrtadmin"}
+: ${openwrtadmin_logfile:="${openwrtadmin_logdir}/daemon.log"}
 
 pidfile="${openwrtadmin_pidfile}"
 procname="${openwrtadmin_python}"
@@ -28,7 +29,7 @@ pollnow_cmd="openwrtadmin_pollnow"
 
 openwrtadmin_prestart()
 {
-    mkdir -p /var/db/openwrt-admin /var/db/openwrt-admin/keys
+    mkdir -p /var/db/openwrt-admin /var/db/openwrt-admin/keys "${openwrtadmin_logdir}"
     touch "${openwrtadmin_logfile}"
 }
 

@@ -9,11 +9,12 @@ import subprocess
 import syslog
 import threading
 import time
+import traceback
 import urllib.parse
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -34,6 +35,7 @@ DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS = 15
 SSH_CONTROL_PERSIST_SECONDS = 120
 DEFAULT_MAX_PARALLEL_POLLS = 8
 DEFAULT_CONFIG_BACKUP_LIMIT = 8
+DEFAULT_STATS_RETENTION_DAYS = 90
 MANAGED_KEY_REF = "managed:openwrt-admin"
 MANAGED_KEY_PATH = KEY_DIR / "managed_ed25519"
 WIRELESS_CONFIG_PATH = "/etc/config/wireless"
@@ -46,6 +48,37 @@ CONFIG_TYPES = ("wifi", "system", "firewall", "dhcp", "rpcd")
 
 def now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def parse_iso_datetime(value):
+    if not value:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+
+    return parsed.replace(microsecond=0)
+
+
+def hour_bucket_iso(value):
+    parsed = parse_iso_datetime(value)
+    if parsed is None:
+        parsed = datetime.now(timezone.utc)
+    return parsed.replace(minute=0, second=0, microsecond=0).isoformat()
 
 
 def format_uptime(seconds):
@@ -110,6 +143,17 @@ def log_event(priority, event, **fields):
     syslog.syslog(priority, compact_json(payload))
 
 
+def log_exception(event, exc):
+    trace = traceback.format_exc()
+    log_event(
+        syslog.LOG_ERR,
+        event,
+        error=str(exc),
+        exception_type=type(exc).__name__,
+        traceback=trace,
+    )
+
+
 def normalize_mac(value):
     if not isinstance(value, str):
         return ""
@@ -119,6 +163,10 @@ def normalize_mac(value):
 
 def integer_or_none(value):
     if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return None
 
 
@@ -130,10 +178,6 @@ def router_label(router):
         if value:
             return value
     return ""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 class BrokerState:
@@ -166,12 +210,14 @@ class BrokerState:
             self._ssh_command_timeout = _int("ssh_command_timeout_seconds", DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS, 2, 120)
             self._max_parallel_polls = _int("max_parallel_polls", DEFAULT_MAX_PARALLEL_POLLS, 1, 64)
             self._config_backup_limit = _int("config_backup_limit", DEFAULT_CONFIG_BACKUP_LIMIT, 1, 50)
+            self._stats_retention_days = _int("stats_retention_days", DEFAULT_STATS_RETENTION_DAYS, 7, 730)
         except Exception:
             self._poll_interval = DEFAULT_POLL_INTERVAL_SECONDS
             self._ssh_connect_timeout = DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS
             self._ssh_command_timeout = DEFAULT_SSH_COMMAND_TIMEOUT_SECONDS
             self._max_parallel_polls = DEFAULT_MAX_PARALLEL_POLLS
             self._config_backup_limit = DEFAULT_CONFIG_BACKUP_LIMIT
+            self._stats_retention_days = DEFAULT_STATS_RETENTION_DAYS
 
     def _ensure_paths(self):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -312,6 +358,29 @@ class BrokerState:
             self._ensure_column(conn, "router_client_status", "ip_address", "TEXT")
             self._ensure_column(conn, "router_client_status", "rx_bps", "INTEGER")
             self._ensure_column(conn, "router_client_status", "tx_bps", "INTEGER")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS router_network_hourly_stats (
+                    router_uuid TEXT NOT NULL,
+                    network_name TEXT NOT NULL,
+                    hour_bucket TEXT NOT NULL,
+                    sample_count INTEGER NOT NULL DEFAULT 0,
+                    client_count_sum INTEGER NOT NULL DEFAULT 0,
+                    signal_sum INTEGER NOT NULL DEFAULT 0,
+                    signal_sample_count INTEGER NOT NULL DEFAULT 0,
+                    best_signal_dbm INTEGER,
+                    worst_signal_dbm INTEGER,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (router_uuid, network_name, hour_bucket)
+                )
+                """
+            )
+            self._ensure_column(conn, "router_network_hourly_stats", "sample_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "router_network_hourly_stats", "client_count_sum", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "router_network_hourly_stats", "signal_sum", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "router_network_hourly_stats", "signal_sample_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "router_network_hourly_stats", "best_signal_dbm", "INTEGER")
+            self._ensure_column(conn, "router_network_hourly_stats", "worst_signal_dbm", "INTEGER")
 
     def _ensure_column(self, conn, table_name, column_name, definition):
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
@@ -336,6 +405,7 @@ class BrokerState:
             "ssh_command_timeout_seconds": "",
             "max_parallel_polls": "",
             "config_backup_limit": "",
+            "stats_retention_days": "",
         }
         if settings_node is not None:
             for key in settings.keys():
@@ -546,6 +616,44 @@ class BrokerState:
             "worst_signal_dbm": min(signals),
             "signal_histogram": compact_json(histogram),
         }
+
+    def parse_network_stats(self, hostapd_outputs):
+        by_network = {}
+
+        for entry in hostapd_outputs:
+            network = str(entry.get("network") or entry.get("radio") or "unknown").strip() or "unknown"
+            payload = entry.get("payload") or {}
+            clients = payload.get("clients") or {}
+            network_stats = by_network.setdefault(
+                network,
+                {
+                    "network_name": network,
+                    "client_count": 0,
+                    "signal_sum": 0,
+                    "signal_sample_count": 0,
+                    "best_signal_dbm": None,
+                    "worst_signal_dbm": None,
+                },
+            )
+
+            if not isinstance(clients, dict):
+                continue
+
+            network_stats["client_count"] += len(clients)
+            for client in clients.values():
+                if not isinstance(client, dict):
+                    continue
+                signal = integer_or_none(client.get("signal"))
+                if signal is None:
+                    continue
+                network_stats["signal_sum"] += signal
+                network_stats["signal_sample_count"] += 1
+                if network_stats["best_signal_dbm"] is None or signal > network_stats["best_signal_dbm"]:
+                    network_stats["best_signal_dbm"] = signal
+                if network_stats["worst_signal_dbm"] is None or signal < network_stats["worst_signal_dbm"]:
+                    network_stats["worst_signal_dbm"] = signal
+
+        return [by_network[name] for name in sorted(by_network.keys())]
 
     def parse_radio_channels(self, wireless_status_payload, hostapd_status_payloads):
         if not isinstance(wireless_status_payload, dict):
@@ -778,6 +886,7 @@ class BrokerState:
             "last_error": last_error,
             "updated_at": now_iso(),
             "client_associations": [],
+            "network_stats": [],
         }
 
     def poll_router(self, router, settings):
@@ -826,6 +935,7 @@ class BrokerState:
             "signal_histogram": None,
         }
         client_associations = []
+        network_stats = []
         hostapd_status_payloads = []
         wireless_status_payload = None
         wireless_status_result = self.run_ssh(address, private_key, ["ubus", "call", "network.wireless", "status"], username=username)
@@ -873,6 +983,7 @@ class BrokerState:
             wifi_clients_by_network = wifi_stats["by_network"]
             signal_stats = self.parse_signal_stats(hostapd_outputs)
             client_associations = self.parse_client_associations(hostapd_outputs)
+            network_stats = self.parse_network_stats(hostapd_outputs)
             radio_channels = self.parse_radio_channels(wireless_status_payload, hostapd_status_payloads)
         elif "Command failed: Not found" in (hostapd_list_result["stderr"] or hostapd_list_result["stdout"]):
             wifi_clients = None
@@ -903,7 +1014,58 @@ class BrokerState:
             "last_seen": now_iso(),
             "last_error": "",
             "updated_at": updated_at,
+            "network_stats": network_stats,
         }
+
+    def write_hourly_network_stats(self, conn, item):
+        hour_bucket = hour_bucket_iso(item.get("updated_at"))
+        for network_stats in item.get("network_stats") or []:
+            network_name = str(network_stats.get("network_name") or "").strip()
+            if network_name == "":
+                continue
+
+            conn.execute(
+                """
+                INSERT INTO router_network_hourly_stats (
+                    router_uuid, network_name, hour_bucket, sample_count, client_count_sum,
+                    signal_sum, signal_sample_count, best_signal_dbm, worst_signal_dbm, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(router_uuid, network_name, hour_bucket) DO UPDATE SET
+                    sample_count = router_network_hourly_stats.sample_count + excluded.sample_count,
+                    client_count_sum = router_network_hourly_stats.client_count_sum + excluded.client_count_sum,
+                    signal_sum = router_network_hourly_stats.signal_sum + excluded.signal_sum,
+                    signal_sample_count = router_network_hourly_stats.signal_sample_count + excluded.signal_sample_count,
+                    best_signal_dbm = CASE
+                        WHEN router_network_hourly_stats.best_signal_dbm IS NULL THEN excluded.best_signal_dbm
+                        WHEN excluded.best_signal_dbm IS NULL THEN router_network_hourly_stats.best_signal_dbm
+                        WHEN excluded.best_signal_dbm > router_network_hourly_stats.best_signal_dbm THEN excluded.best_signal_dbm
+                        ELSE router_network_hourly_stats.best_signal_dbm
+                    END,
+                    worst_signal_dbm = CASE
+                        WHEN router_network_hourly_stats.worst_signal_dbm IS NULL THEN excluded.worst_signal_dbm
+                        WHEN excluded.worst_signal_dbm IS NULL THEN router_network_hourly_stats.worst_signal_dbm
+                        WHEN excluded.worst_signal_dbm < router_network_hourly_stats.worst_signal_dbm THEN excluded.worst_signal_dbm
+                        ELSE router_network_hourly_stats.worst_signal_dbm
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    item["router_uuid"],
+                    network_name,
+                    hour_bucket,
+                    1,
+                    int(network_stats.get("client_count") or 0),
+                    int(network_stats.get("signal_sum") or 0),
+                    int(network_stats.get("signal_sample_count") or 0),
+                    network_stats.get("best_signal_dbm"),
+                    network_stats.get("worst_signal_dbm"),
+                    item["updated_at"],
+                ),
+            )
+
+    def cleanup_old_hourly_stats(self, conn):
+        cutoff = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(days=self._stats_retention_days)
+        conn.execute("DELETE FROM router_network_hourly_stats WHERE hour_bucket < ?", (cutoff.isoformat(),))
 
     def write_poll_results(self, routers, results):
         router_map = {router["router_uuid"]: router for router in routers}
@@ -1124,6 +1286,11 @@ class BrokerState:
                             item["updated_at"],
                         ),
                     )
+
+                if item.get("reachable"):
+                    self.write_hourly_network_stats(conn, item)
+
+            self.cleanup_old_hourly_stats(conn)
 
     def poll_all(self):
         config = self.load_config()
@@ -1910,7 +2077,7 @@ pgrep -af usteer >/dev/null 2>&1
             summary = self.poll_all()
         except Exception as exc:
             summary = {"status": "error", "message": str(exc)}
-            log_event(syslog.LOG_ERR, "broker.poll.exception", message=str(exc))
+            log_exception("broker.poll.exception", exc)
         with self.lock:
             self.last_poll_finished = now_iso()
             self.last_poll_summary = summary
@@ -1988,6 +2155,86 @@ pgrep -af usteer >/dev/null 2>&1
                 """
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def stats_rows(self, start_at=None, end_at=None, router_uuids=None, network_names=None):
+        end_dt = parse_iso_datetime(end_at) or datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        start_dt = parse_iso_datetime(start_at) or (end_dt - timedelta(days=7))
+        if start_dt > end_dt:
+            start_dt, end_dt = end_dt, start_dt
+
+        router_uuids = [str(value).strip() for value in (router_uuids or []) if str(value).strip()]
+        network_names = [str(value).strip() for value in (network_names or []) if str(value).strip()]
+
+        query = [
+            """
+            SELECT hour_bucket, network_name,
+                   CAST(SUM(client_count_sum) AS REAL) / NULLIF(SUM(sample_count), 0) AS avg_clients,
+                   CASE WHEN SUM(signal_sample_count) > 0
+                        THEN CAST(SUM(signal_sum) AS REAL) / SUM(signal_sample_count)
+                        ELSE NULL
+                   END AS avg_signal_dbm,
+                   MAX(best_signal_dbm) AS best_signal_dbm,
+                   MIN(worst_signal_dbm) AS worst_signal_dbm
+            FROM router_network_hourly_stats
+            WHERE hour_bucket >= ? AND hour_bucket <= ?
+            """
+        ]
+        params = [
+            hour_bucket_iso(start_dt.isoformat()),
+            hour_bucket_iso(end_dt.isoformat()),
+        ]
+
+        if router_uuids:
+            placeholders = ",".join("?" for _ in router_uuids)
+            query.append(f"AND router_uuid IN ({placeholders})")
+            params.extend(router_uuids)
+
+        if network_names:
+            placeholders = ",".join("?" for _ in network_names)
+            query.append(f"AND network_name IN ({placeholders})")
+            params.extend(network_names)
+
+        query.append("GROUP BY hour_bucket, network_name")
+        query.append("ORDER BY hour_bucket ASC, network_name COLLATE NOCASE ASC")
+
+        with self._db_context() as conn:
+            rows = [dict(row) for row in conn.execute("\n".join(query), params).fetchall()]
+            routers = [
+                {
+                    "router_uuid": str(row["router_uuid"] or ""),
+                    "address": str(row["address"] or ""),
+                    "label": str(row["configured_hostname"] or row["detected_hostname"] or row["address"] or ""),
+                }
+                for row in conn.execute(
+                    """
+                    SELECT router_uuid, address, configured_hostname, detected_hostname
+                    FROM router_status
+                    ORDER BY address COLLATE NOCASE
+                    """
+                ).fetchall()
+            ]
+            networks = [
+                {"name": str(row["network_name"] or "")}
+                for row in conn.execute(
+                    """
+                    SELECT DISTINCT network_name
+                    FROM router_network_hourly_stats
+                    WHERE network_name IS NOT NULL AND network_name <> ''
+                    ORDER BY network_name COLLATE NOCASE
+                    """
+                ).fetchall()
+            ]
+
+        return {
+            "status": "ok",
+            "start_at": hour_bucket_iso(start_dt.isoformat()),
+            "end_at": hour_bucket_iso(end_dt.isoformat()),
+            "selected_routers": router_uuids,
+            "selected_networks": network_names,
+            "routers": routers,
+            "networks": networks,
+            "rows": rows,
+        }
 
 
 STATE = None
@@ -2070,6 +2317,16 @@ class BrokerHandler(BaseHTTPRequestHandler):
                 return
             result = STATE.run_router_action(action, [str(item) for item in routers if str(item).strip()])
             self._send(200 if result.get("status") == "ok" else 400, result)
+        elif parsed.path == "/v1/stats":
+            self._send(
+                200,
+                STATE.stats_rows(
+                    payload.get("start_at"),
+                    payload.get("end_at"),
+                    payload.get("routers"),
+                    payload.get("networks"),
+                ),
+            )
         elif parsed.path == "/v1/config-sync":
             routers = payload.get("routers") or []
             if not isinstance(routers, list):
@@ -2116,4 +2373,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        log_exception("broker.fatal", exc)
+        raise

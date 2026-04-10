@@ -33,6 +33,11 @@
                 <MinimumValue>1</MinimumValue>
                 <MaximumValue>50</MaximumValue>
             </config_backup_limit>
+            <stats_retention_days type="IntegerField">
+                <Default>90</Default>
+                <MinimumValue>7</MinimumValue>
+                <MaximumValue>730</MaximumValue>
+            </stats_retention_days>
         </settings>
         <routers>
             <router type="ArrayField">
