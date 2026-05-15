@@ -342,7 +342,7 @@ class ServiceController extends ApiControllerBase
         ]);
         $client = new BrokerClient();
         if ($action === 'sync_configs') {
-            $result = $client->syncConfigs($routerIds);
+            $result = $client->startSyncConfigs($routerIds);
         } else {
             $result = $client->routerActions($action, $routerIds);
         }
@@ -360,6 +360,27 @@ class ServiceController extends ApiControllerBase
 
         Logger::error('ui.bulk_action.broker_failure', [
             'action' => $action,
+            'http_status' => $result['status'] ?? 0,
+            'timed_out' => $result['timed_out'] ?? false,
+            'error' => $result['error'] ?? null,
+        ]);
+        return $this->brokerFailure($result, 'Broker request failed.');
+    }
+
+    public function syncJobAction()
+    {
+        $jobId = trim((string)$this->request->get('job_id'));
+        if ($jobId === '') {
+            return ['status' => 'error', 'message' => 'No job selected.'];
+        }
+
+        $result = (new BrokerClient())->syncConfigJob($jobId);
+        if (!empty($result['body']) && is_array($result['body'])) {
+            return $result['body'];
+        }
+
+        Logger::warning('ui.sync_job.broker_failure', [
+            'job_id' => $jobId,
             'http_status' => $result['status'] ?? 0,
             'timed_out' => $result['timed_out'] ?? false,
             'error' => $result['error'] ?? null,

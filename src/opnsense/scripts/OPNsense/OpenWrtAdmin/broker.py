@@ -39,7 +39,13 @@ DEFAULT_CONFIG_BACKUP_LIMIT = 8
 DEFAULT_STATS_RETENTION_DAYS = 90
 
 # How long to wait after pushing a Wi-Fi config before checking radio state.
+# Automatic channel selection and hostapd reloads can legitimately take much
+# longer than two seconds on multi-AP sites. Treat Wi-Fi verification as a
+# polling window instead of a single point-in-time check to avoid false sync
+# failures and unnecessary rollback to known-bad configs.
 WIFI_RELOAD_WAIT_SECONDS = 2
+WIFI_RELOAD_VERIFY_TIMEOUT_SECONDS = 45
+WIFI_RELOAD_VERIFY_INTERVAL_SECONDS = 2
 
 MANAGED_KEY_REF = "managed:openwrt-admin"
 WIRELESS_CONFIG_PATH = "/etc/config/wireless"
@@ -215,6 +221,8 @@ class BrokerState:
         self.last_poll_started = None
         self.last_poll_finished = None
         self.last_poll_summary = {"status": "idle"}
+        self.jobs = {}
+        self.job_counter = 0
         self._ensure_paths()
         self._load_tuning()
         self.executor = ThreadPoolExecutor(max_workers=self._max_parallel_polls)
@@ -1425,16 +1433,20 @@ for radio in $(uci show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-device$/\
     uci set wireless."${radio}".channel='auto'
 done
 
-# Enable 802.11r/k/v on every AP interface (works regardless of naming convention).
+# Stability-first roaming baseline for AP fleets. Keep passive 802.11k
+# neighbor reports enabled, but avoid FT/BSS-transition/WNM knobs that have
+# caused FT_KEY_CANT_BE_DERIVED and nl80211 key-addition failures on this
+# hardware/hostapd combination.
 for section in $(uci show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
     mode=$(uci -q get wireless."${section}".mode || true)
     if [ "${mode}" = "ap" ]; then
-        uci set wireless."${section}".ieee80211r='1'
+        uci set wireless."${section}".ieee80211r='0'
         uci set wireless."${section}".ieee80211k='1'
         uci set wireless."${section}".ft_over_ds='0'
-        uci set wireless."${section}".bss_transition='1'
-        uci set wireless."${section}".wnm_sleep_mode='1'
-        uci set wireless."${section}".wnm_sleep_mode_no_keys='1'
+        uci set wireless."${section}".bss_transition='0'
+        uci set wireless."${section}".wnm_sleep_mode='0'
+        uci set wireless."${section}".wnm_sleep_mode_no_keys='0'
+        uci set wireless."${section}".proxy_arp='0'
     fi
 done
 
@@ -1638,7 +1650,7 @@ pgrep -af usteer >/dev/null 2>&1
             },
             "dhcp": {
                 "path": DHCP_CONFIG_PATH,
-                "apply_commands": [["/etc/init.d/dnsmasq", "restart"]],
+                "apply_commands": [["sh", "-c", "/sbin/reload_config; if /etc/init.d/dnsmasq enabled >/dev/null 2>&1; then /etc/init.d/dnsmasq restart; else /etc/init.d/dnsmasq stop || true; fi; if /etc/init.d/odhcpd enabled >/dev/null 2>&1; then /etc/init.d/odhcpd restart; else /etc/init.d/odhcpd stop || true; fi"]],
             },
             "rpcd": {
                 "path": RPCD_CONFIG_PATH,
@@ -1803,34 +1815,45 @@ pgrep -af usteer >/dev/null 2>&1
         if not address or not private_key:
             return {"ok": False, "message": "Router not reachable for verification."}
 
+        deadline = time.monotonic() + WIFI_RELOAD_VERIFY_TIMEOUT_SECONDS
+        last_message = "Wi-Fi did not come back up normally."
         time.sleep(WIFI_RELOAD_WAIT_SECONDS)
-        result = self.run_ssh(address, private_key, ["ubus", "call", "network.wireless", "status"], username=username)
-        if result["timed_out"]:
-            return {"ok": False, "message": "Timed out waiting for Wi-Fi status."}
-        if not result["ok"]:
-            error_text = result["stderr"] or result["stdout"] or f"ssh exited with code {result['returncode']}"
-            return {"ok": False, "message": classify_ssh_error(error_text)}
 
-        try:
-            payload = json.loads(result["stdout"])
-        except json.JSONDecodeError:
-            return {"ok": False, "message": "Unable to parse Wi-Fi status."}
-
-        radio_states = []
-        for name, radio in payload.items():
-            if not isinstance(radio, dict):
-                continue
-            up = bool(radio.get("up"))
-            disabled = bool(radio.get("disabled"))
-            retry_failed = bool(radio.get("retry_setup_failed"))
-            pending = bool(radio.get("pending"))
-            if up and not disabled and not retry_failed and not pending:
-                radio_states.append(True)
+        while True:
+            result = self.run_ssh(address, private_key, ["ubus", "call", "network.wireless", "status"], username=username)
+            if result["timed_out"]:
+                last_message = "Timed out waiting for Wi-Fi status."
+            elif not result["ok"]:
+                error_text = result["stderr"] or result["stdout"] or f"ssh exited with code {result['returncode']}"
+                last_message = classify_ssh_error(error_text)
             else:
-                radio_states.append(False)
-        if radio_states and all(radio_states):
-            return {"ok": True, "message": "ok"}
-        return {"ok": False, "message": "Wi-Fi did not come back up normally."}
+                try:
+                    payload = json.loads(result["stdout"])
+                except json.JSONDecodeError:
+                    last_message = "Unable to parse Wi-Fi status."
+                else:
+                    radio_states = []
+                    radio_details = []
+                    for name, radio in payload.items():
+                        if not isinstance(radio, dict):
+                            continue
+                        up = bool(radio.get("up"))
+                        disabled = bool(radio.get("disabled"))
+                        retry_failed = bool(radio.get("retry_setup_failed"))
+                        pending = bool(radio.get("pending"))
+                        if up and not disabled and not retry_failed and not pending:
+                            radio_states.append(True)
+                        else:
+                            radio_states.append(False)
+                            radio_details.append(f"{name}: up={up} disabled={disabled} retry_setup_failed={retry_failed} pending={pending}")
+                    if radio_states and all(radio_states):
+                        return {"ok": True, "message": "ok"}
+                    if radio_details:
+                        last_message = "Wi-Fi did not come back up normally: " + "; ".join(radio_details)
+
+            if time.monotonic() >= deadline:
+                return {"ok": False, "message": last_message}
+            time.sleep(WIFI_RELOAD_VERIFY_INTERVAL_SECONDS)
 
     def verify_system_config(self, router, settings, expected_content):
         address = router["address"]
@@ -2082,7 +2105,7 @@ pgrep -af usteer >/dev/null 2>&1
         log_event(syslog.LOG_ERR, "broker.config_restore.rollback_failed", router_uuid=router_uuid, config_type=config_type, content_hash=content_hash, apply_message=apply_result["message"], rollback_message=rollback_result["message"])
         return {"status": "error", "message": "Restore failed and rollback also failed: " + apply_result["message"] + " / " + rollback_result["message"]}
 
-    def sync_all_configs(self, router_uuids):
+    def sync_all_configs(self, router_uuids, progress_callback=None):
         all_results = []
         changed = 0
         successful = 0
@@ -2101,6 +2124,8 @@ pgrep -af usteer >/dev/null 2>&1
             changed += result.get("changed", 0)
             successful += result.get("successful", 0)
             failed += result.get("failed", 0)
+            if progress_callback is not None:
+                progress_callback(config_type, result, list(all_results))
 
         matched = matched if matched is not None else len(router_uuids)
         response = {
@@ -2123,6 +2148,72 @@ pgrep -af usteer >/dev/null 2>&1
             changed=changed,
         )
         return response
+
+    def start_config_sync_job(self, router_uuids):
+        with self.lock:
+            self.job_counter += 1
+            job_id = f"sync-{int(time.time())}-{self.job_counter}"
+            self.jobs[job_id] = {
+                "job_id": job_id,
+                "type": "config_sync",
+                "status": "running",
+                "requested": len(router_uuids),
+                "completed_types": 0,
+                "total_types": len(CONFIG_TYPES),
+                "successful": 0,
+                "failed": 0,
+                "changed": 0,
+                "results": [],
+                "message": "Starting config sync.",
+                "started_at": now_iso(),
+                "finished_at": None,
+            }
+
+        thread = threading.Thread(target=self._config_sync_job_worker, args=(job_id, router_uuids), daemon=True)
+        thread.start()
+        return self.job_status(job_id)
+
+    def _config_sync_job_worker(self, job_id, router_uuids):
+        def progress(config_type, partial_result, all_results):
+            with self.lock:
+                job = self.jobs.get(job_id)
+                if job is None:
+                    return
+                job["completed_types"] += 1
+                job["successful"] = sum(1 for item in all_results if item.get("ok"))
+                job["failed"] = sum(1 for item in all_results if not item.get("ok"))
+                job["changed"] = sum(1 for item in all_results if item.get("changed"))
+                job["results"] = sorted(all_results, key=lambda item: (item.get("address", ""), item.get("config_type", "")))
+                job["message"] = f"Completed {config_type} sync: {partial_result.get('successful', 0)} ok, {partial_result.get('failed', 0)} failed."
+
+        try:
+            result = self.sync_all_configs(router_uuids, progress_callback=progress)
+            with self.lock:
+                job = self.jobs.get(job_id)
+                if job is not None:
+                    job.update(result)
+                    job["job_id"] = job_id
+                    job["type"] = "config_sync"
+                    job["status"] = "finished" if result.get("status") == "ok" else "error"
+                    job["completed_types"] = len(CONFIG_TYPES)
+                    job["total_types"] = len(CONFIG_TYPES)
+                    job["finished_at"] = now_iso()
+                    job["message"] = result.get("message") or f"Config sync finished: {result.get('successful', 0)} ok, {result.get('failed', 0)} failed."
+        except Exception as exc:
+            log_exception("broker.config_sync.job_exception", exc, job_id=job_id)
+            with self.lock:
+                job = self.jobs.get(job_id)
+                if job is not None:
+                    job["status"] = "error"
+                    job["message"] = str(exc)
+                    job["finished_at"] = now_iso()
+
+    def job_status(self, job_id):
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return {"status": "error", "message": "Job not found."}
+            return json.loads(json.dumps(job))
 
     def trigger_poll(self):
         with self.lock:
@@ -2345,6 +2436,10 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self._send(200, {"status": "ok", "routers": STATE.router_rows()})
         elif parsed.path == "/v1/clients":
             self._send(200, {"status": "ok", "clients": STATE.client_rows()})
+        elif parsed.path == "/v1/config-sync-job":
+            job_id = (query.get("job_id") or [""])[0]
+            result = STATE.job_status(job_id)
+            self._send(200 if result.get("status") != "error" else 404, result)
         elif parsed.path == "/v1/config-backups":
             router_uuid = (query.get("router_uuid") or [""])[0]
             config_type = (query.get("config_type") or [""])[0]
@@ -2397,8 +2492,11 @@ class BrokerHandler(BaseHTTPRequestHandler):
             if not isinstance(routers, list):
                 self._send(400, {"status": "error", "message": "Routers must be a list"})
                 return
-            result = STATE.sync_all_configs([str(item) for item in routers if str(item).strip()])
-            self._send(200 if result.get("status") == "ok" else 400, result)
+            if bool(payload.get("async")):
+                result = STATE.start_config_sync_job([str(item) for item in routers if str(item).strip()])
+            else:
+                result = STATE.sync_all_configs([str(item) for item in routers if str(item).strip()])
+            self._send(200 if result.get("status") in ("ok", "running", "finished") else 400, result)
         elif parsed.path == "/v1/config-restore":
             router_uuid = str(payload.get("router_uuid") or "").strip()
             config_type = str(payload.get("config_type") or "").strip()

@@ -273,6 +273,47 @@
             $("#bulkRadiosOffBtn span").removeClass().text("off");
         }
 
+        function summarizeBulkResult(data, action) {
+            var failed = Array.isArray(data.results)
+                ? data.results.filter(function(item) { return !item.ok; })
+                : [];
+
+            if ((data.status || "") !== "ok" && (data.status || "") !== "finished") {
+                setBulkActionStatus(data.message || "{{ lang._('Bulk action failed.') }}", "error");
+            } else if (failed.length) {
+                var details = failed.map(function(item) {
+                    return (item.address || item.router_uuid || "router") + ": " + (item.config_type ? item.config_type + " " : "") + (item.message || "error");
+                }).join("; ");
+                setBulkActionStatus((data.successful || 0) + " {{ lang._('ok') }}, " + failed.length + " {{ lang._('failed.') }} " + details, "error");
+            } else if (action === "sync_configs") {
+                setBulkActionStatus((data.changed || 0) + " {{ lang._('router config item(s) synced.') }}", "success");
+            } else if (action === "sys_update") {
+                setBulkActionStatus((data.successful || 0) + " {{ lang._('router(s) updated with system packages.') }}", "success");
+            } else if (action === "apply_roaming_baseline") {
+                setBulkActionStatus((data.successful || 0) + " {{ lang._('router(s) updated with the roaming baseline.') }}", "success");
+            } else {
+                setBulkActionStatus((data.successful || 0) + " {{ lang._('router(s) updated.') }}", "success");
+            }
+        }
+
+        function pollSyncJob(jobId, action) {
+            ajaxCall("/api/openwrtadmin/service/sync_job/", {job_id: jobId}, function(data) {
+                var status = data.status || "";
+                var completed = data.completed_types || 0;
+                var total = data.total_types || 0;
+                if (status === "running") {
+                    setBulkActionStatus("{{ lang._('Syncing configs') }}: " + completed + "/" + total + " {{ lang._('config types complete') }}, " + (data.successful || 0) + " {{ lang._('ok') }}, " + (data.failed || 0) + " {{ lang._('failed') }}. " + (data.message || ""), "info");
+                    window.setTimeout(function() { pollSyncJob(jobId, action); }, 2000);
+                    return;
+                }
+                summarizeBulkResult(data, action);
+                updateBulkActionButtons();
+                window.setTimeout(function() {
+                    $(gridId).bootgrid("reload");
+                }, 1000);
+            });
+        }
+
         function performBulkAction(action, title, prompt) {
             var routers = selectedRouterIds();
             if (!routers.length) {
@@ -285,27 +326,11 @@
                 setBulkActionStatus("{{ lang._('Running') }} " + title.toLowerCase() + "...", "info");
                 $(bulkActionButtonIds).prop("disabled", true);
                 ajaxCall("/api/openwrtadmin/service/bulk_action/", {action: action, routers: routers}, function(data) {
-                    var failed = Array.isArray(data.results)
-                        ? data.results.filter(function(item) { return !item.ok; })
-                        : [];
-
-                    if ((data.status || "") !== "ok") {
-                        setBulkActionStatus(data.message || "{{ lang._('Bulk action failed.') }}", "error");
-                    } else if (failed.length) {
-                        var details = failed.map(function(item) {
-                            return (item.address || item.router_uuid || "router") + ": " + (item.message || "error");
-                        }).join("; ");
-                        setBulkActionStatus((data.successful || 0) + " {{ lang._('ok') }}, " + failed.length + " {{ lang._('failed.') }} " + details, "error");
-                    } else if (action === "sync_configs") {
-                        setBulkActionStatus((data.changed || 0) + " {{ lang._('router(s) synced.') }}", "success");
-                    } else if (action === "sys_update") {
-                        setBulkActionStatus((data.successful || 0) + " {{ lang._('router(s) updated with system packages.') }}", "success");
-                    } else if (action === "apply_roaming_baseline") {
-                        setBulkActionStatus((data.successful || 0) + " {{ lang._('router(s) updated with the roaming baseline.') }}", "success");
-                    } else {
-                        setBulkActionStatus((data.successful || 0) + " {{ lang._('router(s) updated.') }}", "success");
+                    if (action === "sync_configs" && data.job_id) {
+                        pollSyncJob(data.job_id, action);
+                        return;
                     }
-
+                    summarizeBulkResult(data, action);
                     updateBulkActionButtons();
                     window.setTimeout(function() {
                         $(gridId).bootgrid("reload");

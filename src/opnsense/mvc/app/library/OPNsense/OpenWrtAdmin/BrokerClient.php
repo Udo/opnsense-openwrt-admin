@@ -157,6 +157,19 @@ class BrokerClient
         ], self::SYNC_TIMEOUT);
     }
 
+    public function startSyncConfigs(array $routers): array
+    {
+        return $this->request('POST', '/v1/config-sync', [
+            'routers' => array_values($routers),
+            'async' => true,
+        ], self::ACTION_TIMEOUT);
+    }
+
+    public function syncConfigJob(string $jobId): array
+    {
+        return $this->request('GET', '/v1/config-sync-job?job_id=' . rawurlencode($jobId), null, self::ACTION_TIMEOUT);
+    }
+
     public function configBackups(string $routerUuid, string $configType): array
     {
         return $this->request(
