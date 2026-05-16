@@ -1,0 +1,27 @@
+<metadata>
+    <openwrtadmin>
+        <filename>OpenWrtAdmin.js</filename>
+        <link>/ui/openwrtadmin/dashboard</link>
+        <endpoints>
+            <endpoint>/api/openwrtadmin/service/routers/</endpoint>
+            <endpoint>/api/openwrtadmin/service/status/</endpoint>
+        </endpoints>
+        <translations>
+            <title>OpenWrt Admin</title>
+            <address>Address</address>
+            <hostname>Hostname</hostname>
+            <status>Status</status>
+            <load>Load</load>
+            <uptime>Uptime</uptime>
+            <memory>Memory</memory>
+            <wifi_clients>WiFi</wifi_clients>
+            <channels>Channels</channels>
+            <bandwidth>Bandwidth</bandwidth>
+            <signal>Signal</signal>
+            <no_routers>No routers registered yet.</no_routers>
+            <broker_down>The OpenWrt Admin background service is not running</broker_down>
+            <broker_down_hint>Go to Services → OpenWrt Admin to start it.</broker_down_hint>
+            <columns>Columns</columns>
+        </translations>
+    </openwrtadmin>
+</metadata>
